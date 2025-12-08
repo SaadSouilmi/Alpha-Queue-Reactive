@@ -1,0 +1,35 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# C++ build artifacts
+cmake-build-debug/
+cmake-build-release/
+CMakeFiles/
+_deps/
+CMakeCache.txt
+Makefile
+cmake_install.cmake
+
+# IDE
+.idea/
+
+# Data files (too large for git)
+data/
+*.parquet
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Misc
+*.o
+*.a
+*.so
+*.dylib
