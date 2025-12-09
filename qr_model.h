@@ -7,6 +7,34 @@
 #include <cmath>
 
 namespace qr {
+
+    // Size distribution parameters for geometric distribution
+    // Key: (imb_bin_idx, event_type, queue_level) -> p parameter
+    struct SizeDistributions {
+        static constexpr int NUM_IMB_BINS = 21;
+        static constexpr int32_t MAX_SIZE = 50;
+
+        // [imb_bin][event_type: 0=Add, 1=Can, 2=Trd][queue: 0=q1, 1=q2]
+        // Trd only has queue 1, so [imb][2][1] is unused
+        std::array<std::array<std::array<double, 2>, 3>, NUM_IMB_BINS> p_params{};
+
+        SizeDistributions() = default;
+        SizeDistributions(const std::string& csv_path);
+
+        // Sample size from geometric distribution capped at MAX_SIZE
+        int32_t sample_size(int imb_bin, OrderType type, int queue, std::mt19937_64& rng) const {
+            int type_idx = (type == OrderType::Add) ? 0 : (type == OrderType::Cancel) ? 1 : 2;
+            int queue_idx = queue - 1;  // queue 1 -> 0, queue 2 -> 1
+            double p = p_params[imb_bin][type_idx][queue_idx];
+
+            if (p <= 0.0 || p >= 1.0) return 1;  // fallback
+
+            std::geometric_distribution<int32_t> dist(p);
+            int32_t size = dist(rng) + 1;  // geometric_distribution gives 0,1,2,... we want 1,2,3,...
+            return std::min(size, MAX_SIZE);
+        }
+    };
+
     struct Event {
         OrderType type;
         Side side;
@@ -178,13 +206,28 @@ namespace qr {
 
     class QRModel {
     public:
+        // Constructor without size distributions (sizes default to 1)
         QRModel(OrderBook* lob, const QRParams& params, uint64_t seed = 42) :
-            lob_(lob), params_(params), rng_(seed) {}
+            lob_(lob), params_(params), size_dists_(nullptr), rng_(seed) {}
+
+        // Constructor with size distributions
+        QRModel(OrderBook* lob, const QRParams& params, const SizeDistributions& size_dists, uint64_t seed = 42) :
+            lob_(lob), params_(params), size_dists_(&size_dists), rng_(seed) {}
 
         Order sample_order(int64_t current_time) {
             StateParams& state_params = get_state_params();
             const Event& event = state_params.sample_event(rng_);
-            Order order(event.type, event.side, get_price(event), 1, current_time);
+
+            int32_t size = 1;
+            if (size_dists_ && lob_->spread() == 1) {
+                // Only use size distributions for spread=1
+                uint8_t imb_bin = get_imbalance_bin(lob_->imbalance());
+                int queue = std::abs(event.queue_nbr);
+                if (queue == 0) queue = 1;  // Trd uses queue 1
+                size = size_dists_->sample_size(imb_bin, event.type, queue, rng_);
+            }
+
+            Order order(event.type, event.side, get_price(event), size, current_time);
             return order;
         }
 
@@ -201,6 +244,7 @@ namespace qr {
     private:
         OrderBook* lob_;
         QRParams params_;
+        const SizeDistributions* size_dists_;
         std::mt19937_64 rng_;
 
         // 21 bins: -1.0 (idx 0), -0.9 (idx 1), ..., 0.0 (idx 10), ..., 0.9 (idx 19), 1.0 (idx 20)

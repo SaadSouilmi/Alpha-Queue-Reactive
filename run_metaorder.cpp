@@ -195,6 +195,7 @@ constexpr int32_t MAX_ORDER_SIZE = 5;
 constexpr int64_t METAORDER_DURATION_NS = 5LL * 60 * 1'000'000'000;  // 5 minutes in nanoseconds
 
 // Build metaorder: total_vol spread over 5 minutes, max size per order = 5
+// First order at t=0, last order at t=5min
 MetaOrder build_metaorder(int32_t total_vol, Side side) {
     MetaOrder metaorder;
     metaorder.side = side;
@@ -203,8 +204,9 @@ MetaOrder build_metaorder(int32_t total_vol, Side side) {
     int num_orders = (total_vol + MAX_ORDER_SIZE - 1) / MAX_ORDER_SIZE;
     if (num_orders == 0) num_orders = 1;
 
-    // Time interval between orders
-    int64_t interval = METAORDER_DURATION_NS / num_orders;
+    // Time interval between orders (so last order lands at exactly 5 min)
+    // For n orders: t=0, t=interval, ..., t=(n-1)*interval = 5min
+    int64_t interval = (num_orders > 1) ? METAORDER_DURATION_NS / (num_orders - 1) : 0;
 
     int32_t remaining = total_vol;
     for (int i = 0; i < num_orders; i++) {
@@ -233,10 +235,11 @@ void run_and_accumulate(const std::string& data_path, const QueueDistributions& 
              std::vector<int32_t>(cfg.ask_vols.begin(), cfg.ask_vols.end()));
 
     QRParams params(data_path);
-    QRModel model(&lob, params, seed);
+    SizeDistributions size_dists(data_path + "/size_distrib.csv");
+    QRModel model(&lob, params, size_dists, seed);
 
-    // NoImpact
-    NoImpact impact;
+    // EMAImpact with alpha=0.005, m=3.0 (persistent impact)
+    EMAImpact impact(0.005, 3.0);
 
     // Build metaorder based on volume
     MetaOrder metaorder = build_metaorder(metaorder_vol, Side::Ask);
@@ -376,7 +379,7 @@ int main() {
             }
         }
 
-        std::string out_path = base_results_path + "/no_impact_pct_" + std::to_string(static_cast<int>(pct * 10)) + ".csv";
+        std::string out_path = base_results_path + "/ema_impact_pct_" + std::to_string(static_cast<int>(pct * 10)) + ".csv";
         acc.save_csv(out_path);
 
         auto end = std::chrono::high_resolution_clock::now();

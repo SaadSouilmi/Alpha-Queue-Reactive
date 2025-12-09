@@ -130,4 +130,48 @@ QRParams::QRParams(const std::string& path) {
     }
 }
 
+SizeDistributions::SizeDistributions(const std::string& csv_path) {
+    // Load size distribution parameters
+    // Format: imb_bin,event,event_q,p
+    std::ifstream file(csv_path);
+    if (!file.is_open()) {
+        throw std::runtime_error("Cannot open size_distrib.csv: " + csv_path);
+    }
+
+    std::string line;
+    std::getline(file, line); // skip header
+
+    while (std::getline(file, line)) {
+        std::istringstream ss(line);
+        std::string token;
+
+        // imb_bin (float like -1.0, -0.9, 0.0, etc.)
+        std::getline(ss, token, ',');
+        double imb_bin_val = std::stod(token);
+        int imb_bin = imb_bin_to_index(imb_bin_val);
+
+        // event type (Add, Can, Trd)
+        std::getline(ss, token, ',');
+        int type_idx;
+        if (token == "Add") type_idx = 0;
+        else if (token == "Can") type_idx = 1;
+        else if (token == "Trd") type_idx = 2;
+        else continue;  // skip unknown types
+
+        // event_q (queue number: 1 or 2)
+        std::getline(ss, token, ',');
+        int queue = std::stoi(token);
+        int queue_idx = queue - 1;  // 1->0, 2->1
+
+        // p (geometric distribution parameter)
+        std::getline(ss, token, ',');
+        double p = std::stod(token);
+
+        if (imb_bin >= 0 && imb_bin < NUM_IMB_BINS && queue_idx >= 0 && queue_idx < 2) {
+            p_params[imb_bin][type_idx][queue_idx] = p;
+        }
+    }
+    file.close();
+}
+
 }

@@ -21,7 +21,8 @@ int main() {
               {6, 17, 22, 23});
 
     QRParams params(data_path);
-    QRModel model(&lob, params, 42);
+    SizeDistributions size_dists(data_path + "/size_distrib.csv");
+    QRModel model(&lob, params, size_dists, 42);
 
     int64_t duration = 1e9 * 3600 * 1000;  // 5.5 hours
 
