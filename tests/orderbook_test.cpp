@@ -6,13 +6,14 @@ using namespace qr;
 class OrderBookTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        lob = std::make_unique<OrderBook>(4);
+        lob = std::make_unique<OrderBook>(dists_, 4);
         lob->init({1516, 1517, 1518, 1519},  // bid prices
                   {4, 1, 10, 5},              // bid volumes
                   {1520, 1521, 1522, 1523},   // ask prices
                   {3, 17, 22, 23});           // ask volumes
     }
 
+    QueueDistributions dists_;  // empty distributions for testing
     std::unique_ptr<OrderBook> lob;
 };
 

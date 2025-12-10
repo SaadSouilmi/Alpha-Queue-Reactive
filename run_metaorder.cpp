@@ -239,7 +239,10 @@ void run_and_accumulate(const std::string& data_path, const QueueDistributions& 
     QRModel model(&lob, params, size_dists, seed);
 
     // EMAImpact with alpha=0.005, m=3.0 (persistent impact)
-    EMAImpact impact(0.005, 3.0);
+    EMAImpact impact(0.005, 6);
+
+		// NoImpact
+		// NoImpact impact;
 
     // Build metaorder based on volume
     MetaOrder metaorder = build_metaorder(metaorder_vol, Side::Ask);
@@ -266,8 +269,8 @@ void run_and_accumulate(const std::string& data_path, const QueueDistributions& 
         for (int bin = 0; bin < QRParams::NUM_IMB_BINS; bin++) {
             auto& state = params.state_params[bin][0];  // spread=1 -> index 0
             state.bias(current_bias);
-            prob_rec.bid_prob[bin] = state.probs[trd_idx.bid_idx[bin]];
-            prob_rec.ask_prob[bin] = state.probs[trd_idx.ask_idx[bin]];
+            prob_rec.bid_prob[bin] = state.probs[trd_idx.bid_idx[bin]] / state.total;
+            prob_rec.ask_prob[bin] = state.probs[trd_idx.ask_idx[bin]] / state.total;
         }
         prob_records.push_back(prob_rec);
 
@@ -305,8 +308,8 @@ void run_and_accumulate(const std::string& data_path, const QueueDistributions& 
 }
 
 int main() {
-    std::string data_path = "/Users/saad.souilmi/dev_cpp/queue_reactive/data/AAL2";
-    std::string base_results_path = "/Users/saad.souilmi/dev_cpp/queue_reactive/data/results";
+    std::string data_path = "/home/labcmap/saad.souilmi/dev_cpp/qr/data/AAL2";
+    std::string base_results_path = "/home/labcmap/saad.souilmi/dev_cpp/qr/data/results";
 
     // Load queue distributions once
     QueueDistributions dists(data_path + "/inv_distributions_qmax30.csv");
@@ -323,6 +326,7 @@ int main() {
     std::cout << "Computed trade indices\n";
 
     int num_sims = 100'000;
+    //int num_sims = 1;
     int num_threads = std::thread::hardware_concurrency();
 
     int64_t duration = 30LL * 60 * 1'000'000'000;  // 30 minutes

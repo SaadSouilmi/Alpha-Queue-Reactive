@@ -121,7 +121,7 @@ protected:
 
 TEST_F(QRParamsTest, LoadFromCSV) {
     try {
-        QRParams params("/Users/saad.souilmi/dev_cpp/queue_reactive/data/AAL2");
+        QRParams params("/home/labcmap/saad.souilmi/dev_cpp/qr/data/AAL2");
 
         // Check all states are populated (21 imbalance bins now)
         for (int imb = 0; imb < QRParams::NUM_IMB_BINS; imb++) {
@@ -145,7 +145,7 @@ TEST_F(QRParamsTest, LoadFromCSV) {
 
 TEST_F(QRParamsTest, ProbabilitiesSumToOne) {
     try {
-        QRParams params("/Users/saad.souilmi/dev_cpp/queue_reactive/data/AAL2");
+        QRParams params("/home/labcmap/saad.souilmi/dev_cpp/qr/data/AAL2");
 
         for (int imb = 0; imb < QRParams::NUM_IMB_BINS; imb++) {
             for (int spread = 0; spread < 2; spread++) {
@@ -171,7 +171,7 @@ protected:
     void SetUp() override {
         // Load queue distributions for OrderBook
         try {
-            dists = std::make_unique<QueueDistributions>("/Users/saad.souilmi/dev_cpp/queue_reactive/data/AAL/inv_distributions_qmax30.csv");
+            dists = std::make_unique<QueueDistributions>("/home/labcmap/saad.souilmi/dev_cpp/qr/data/AAL2/inv_distributions_qmax30.csv");
         } catch (...) {
             // If file not found, create empty distributions
             dists = std::make_unique<QueueDistributions>();
@@ -189,7 +189,7 @@ protected:
 
 TEST_F(QRModelTest, SampleOrderReturnsValidOrder) {
     try {
-        QRParams params("/Users/saad.souilmi/dev_cpp/queue_reactive/data/AAL2");
+        QRParams params("/home/labcmap/saad.souilmi/dev_cpp/qr/data/AAL2");
         QRModel model(lob.get(), params, 42);
 
         for (int i = 0; i < 100; i++) {
@@ -215,7 +215,7 @@ TEST_F(QRModelTest, SampleOrderReturnsValidOrder) {
 
 TEST_F(QRModelTest, SampleDtReturnsPositive) {
     try {
-        QRParams params("/Users/saad.souilmi/dev_cpp/queue_reactive/data/AAL2");
+        QRParams params("/home/labcmap/saad.souilmi/dev_cpp/qr/data/AAL2");
         QRModel model(lob.get(), params, 42);
 
         for (int i = 0; i < 100; i++) {
@@ -229,7 +229,7 @@ TEST_F(QRModelTest, SampleDtReturnsPositive) {
 
 TEST_F(QRModelTest, DeterministicWithSameSeed) {
     try {
-        QRParams params("/Users/saad.souilmi/dev_cpp/queue_reactive/data/AAL2");
+        QRParams params("/home/labcmap/saad.souilmi/dev_cpp/qr/data/AAL2");
         QRModel model1(lob.get(), params, 123);
         QRModel model2(lob.get(), params, 123);
 
@@ -248,7 +248,7 @@ TEST_F(QRModelTest, DeterministicWithSameSeed) {
 
 TEST_F(QRModelTest, DifferentWithDifferentSeeds) {
     try {
-        QRParams params("/Users/saad.souilmi/dev_cpp/queue_reactive/data/AAL2");
+        QRParams params("/home/labcmap/saad.souilmi/dev_cpp/qr/data/AAL2");
         QRModel model1(lob.get(), params, 111);
         QRModel model2(lob.get(), params, 222);
 
@@ -269,7 +269,7 @@ TEST_F(QRModelTest, DifferentWithDifferentSeeds) {
 
 TEST_F(QRModelTest, PriceComputationCreateBid) {
     try {
-        QRParams params("/Users/saad.souilmi/dev_cpp/queue_reactive/data/AAL2");
+        QRParams params("/home/labcmap/saad.souilmi/dev_cpp/qr/data/AAL2");
         QRModel model(lob.get(), params, 42);
 
         // For CreateBid, price should be best_bid + 1
@@ -291,7 +291,7 @@ TEST_F(QRModelTest, PriceComputationCreateBid) {
 
 TEST_F(QRModelTest, PriceComputationCreateAsk) {
     try {
-        QRParams params("/Users/saad.souilmi/dev_cpp/queue_reactive/data/AAL2");
+        QRParams params("/home/labcmap/saad.souilmi/dev_cpp/qr/data/AAL2");
         QRModel model(lob.get(), params, 42);
 
         // For CreateAsk, price should be best_ask - 1
@@ -317,7 +317,7 @@ TEST_F(QRModelTest, PriceComputationCreateAsk) {
 
 TEST_F(QRModelTest, SimulationRuns) {
     try {
-        QRParams params("/Users/saad.souilmi/dev_cpp/queue_reactive/data/AAL2");
+        QRParams params("/home/labcmap/saad.souilmi/dev_cpp/qr/data/AAL2");
         QRModel model(lob.get(), params, 42);
 
         int64_t time = 0;

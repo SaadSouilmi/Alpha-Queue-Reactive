@@ -8,7 +8,7 @@ using namespace qr;
 
 int main() {
     std::string data_path = "/home/labcmap/saad.souilmi/dev_cpp/qr/data/AAL2";
-    std::string output_path = "/home/labcmap/saad.souilmi/dev_cpp/qr/data/results/result.parquet";
+    std::string output_path = "/home/labcmap/saad.souilmi/dev_cpp/qr/data/results/result_alpha_no_alpha.parquet";
 
     // Load queue distributions
     QueueDistributions dists(data_path + "/inv_distributions_qmax30.csv");
@@ -24,10 +24,19 @@ int main() {
     SizeDistributions size_dists(data_path + "/size_distrib.csv");
     QRModel model(&lob, params, size_dists, 42);
 
-    int64_t duration = 1e9 * 3600 * 1000;  // 5.5 hours
+    // Create OU alpha process
+    // kappa = 0.15 min^-1 (~5 min persistence)
+    // s = 0.5 (stationary std dev)
+    OUAlpha alpha(0.15, 0.5, 123);
+
+    // Create EMA impact (or use NoImpact for pure alpha)
+    // EMAImpact impact(0.005, 6.0);
+    NoImpact impact;
+
+    int64_t duration = 1e9 * 3600 * 1000;  // 1 hour in nanoseconds
 
     auto start = std::chrono::high_resolution_clock::now();
-    Buffer result = run_simple(lob, model, duration);
+    Buffer result = run_with_alpha(lob, model, impact, alpha, duration);
     auto end = std::chrono::high_resolution_clock::now();
 
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
@@ -40,4 +49,5 @@ int main() {
 
     auto save_time = std::chrono::duration_cast<std::chrono::milliseconds>(end_save - start_save);
     std::cout << "Parquet save: " << save_time.count() << " ms\n";
+    std::cout << "Output: " << output_path << "\n";
 }

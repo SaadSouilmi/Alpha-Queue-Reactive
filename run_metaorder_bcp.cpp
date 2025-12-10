@@ -109,8 +109,8 @@ void run_and_accumulate(const std::string& data_path, const QueueDistributions& 
 }
 
 int main() {
-    std::string data_path = "/Users/saad.souilmi/dev_cpp/queue_reactive/data/AAL";
-    std::string base_results_path = "/Users/saad.souilmi/dev_cpp/queue_reactive/data/results";
+    std::string data_path = "/home/labcmap/saad.souilmi/dev_cpp/qr/data/AAL2";
+    std::string base_results_path = "/home/labcmap/saad.souilmi/dev_cpp/qr/data/results";
 
     // Load queue distributions once
     QueueDistributions dists(data_path + "/inv_distributions_qmax30.csv");

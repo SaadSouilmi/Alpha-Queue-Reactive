@@ -29,6 +29,7 @@ namespace qr {
         bool rejected;
         bool partial;
         double bias;
+        double alpha;
         double trade_sign_mean;
 
         void record_lob(const OrderBook& lob) {
@@ -72,5 +73,6 @@ namespace qr {
     // Simple loop - runs until duration elapsed
     Buffer run_simple(OrderBook& lob, QRModel& model, int64_t duration);
     Buffer run_metaorder(OrderBook& lob, QRModel& model, MarketImpact& impact, MetaOrder& metaorder, int64_t duration);
+    Buffer run_with_alpha(OrderBook& lob, QRModel& model, MarketImpact& impact, Alpha& alpha, int64_t duration);
 
 }

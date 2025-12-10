@@ -174,4 +174,23 @@ SizeDistributions::SizeDistributions(const std::string& csv_path) {
     file.close();
 }
 
+// ============================================================================
+// OUAlpha Implementation
+// ============================================================================
+
+OUAlpha::OUAlpha(double kappa_per_min, double s, uint64_t seed)
+    : kappa_(kappa_per_min / (60.0 * 1e9)),  // convert min^-1 to ns^-1
+      sigma_(s * std::sqrt(2.0 * kappa_)),
+      alpha_(0.0),
+      rng_(seed) {}
+
+void OUAlpha::step(int64_t dt_ns) {
+    double dt = static_cast<double>(dt_ns);
+    double decay = std::exp(-kappa_ * dt);
+    // Variance of the conditional distribution: σ²(1 - e^{-2κdt})/(2κ)
+    double var = (sigma_ * sigma_) * (1.0 - decay * decay) / (2.0 * kappa_);
+    double std_dev = std::sqrt(var);
+    alpha_ = alpha_ * decay + std_dev * normal_(rng_);
+}
+
 }

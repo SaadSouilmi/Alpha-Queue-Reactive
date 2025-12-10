@@ -52,11 +52,12 @@ namespace qr {
         double lambda;
 
         void bias(double b) {
-            // Multiply trade bid probs by 1 + b and trade ask probs by 1 - b
+            // Exponential bias: always positive, no clamping needed
+            // bid trades *= exp(b), ask trades *= exp(-b)
             total = 0.0;
             for (size_t i = 0; i < events.size(); i++) {
                 if (events[i].type == OrderType::Trade) {
-                    double factor = (events[i].side == Side::Bid) ? 1+b : 1-b;
+                    double factor = (events[i].side == Side::Bid) ? std::exp(b) : std::exp(-b);
                     probs[i] = base_probs[i] * factor;
                 }
                 else
@@ -202,6 +203,43 @@ namespace qr {
         double A_;
         int64_t t0_;
         bool on_ = false;
+    };
+
+    // ============================================================================
+    // Alpha Process Interface
+    // ============================================================================
+
+    class Alpha {
+    public:
+        virtual ~Alpha() = default;
+        virtual void step(int64_t dt_ns) = 0;
+        virtual double value() const = 0;
+        virtual void reset() = 0;
+    };
+
+    class NoAlpha : public Alpha {
+    public:
+        void step(int64_t) override {}
+        double value() const override { return 0.0; }
+        void reset() override {}
+    };
+
+    class OUAlpha : public Alpha {
+    public:
+        // kappa_per_min: mean reversion rate in min^-1
+        // s: stationary standard deviation
+        OUAlpha(double kappa_per_min, double s, uint64_t seed);
+
+        void step(int64_t dt_ns) override;
+        double value() const override { return alpha_; }
+        void reset() override { alpha_ = 0.0; }
+
+    private:
+        double kappa_;    // in ns^-1
+        double sigma_;    // σ = s·√(2κ)
+        double alpha_;
+        std::mt19937_64 rng_;
+        std::normal_distribution<> normal_{0.0, 1.0};
     };
 
     class QRModel {

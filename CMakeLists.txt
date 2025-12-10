@@ -4,7 +4,11 @@ project(queue_reactive CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -Wall -Wextra")
-set(CMAKE_TOOLCHAIN_FILE "~/vcpkg/scripts/buildsystems/vcpkg.cmake")
+
+# Use conda environment for Arrow/Parquet
+if(DEFINED ENV{CONDA_PREFIX})
+    list(APPEND CMAKE_PREFIX_PATH "$ENV{CONDA_PREFIX}")
+endif()
 
 # Find Arrow and Parquet
 find_package(Arrow REQUIRED)
@@ -44,6 +48,19 @@ add_executable(run_metaorder
 )
 
 target_link_libraries(run_metaorder
+    Arrow::arrow_shared
+    Parquet::parquet_shared
+)
+
+# Sample with alpha executable
+add_executable(sample_alpha
+    sample_alpha.cpp
+    orderbook.cpp
+    qr_model.cpp
+    simulation.cpp
+)
+
+target_link_libraries(sample_alpha
     Arrow::arrow_shared
     Parquet::parquet_shared
 )
