@@ -32,6 +32,7 @@ add_executable(sample
     orderbook.cpp
     qr_model.cpp
     simulation.cpp
+    race.cpp
 )
 
 target_link_libraries(sample
@@ -45,9 +46,24 @@ add_executable(run_metaorder
     orderbook.cpp
     qr_model.cpp
     simulation.cpp
+    race.cpp
 )
 
 target_link_libraries(run_metaorder
+    Arrow::arrow_shared
+    Parquet::parquet_shared
+)
+
+# Baseline simulation executable (no metaorder)
+add_executable(run_baseline
+    run_baseline.cpp
+    orderbook.cpp
+    qr_model.cpp
+    simulation.cpp
+    race.cpp
+)
+
+target_link_libraries(run_baseline
     Arrow::arrow_shared
     Parquet::parquet_shared
 )
@@ -58,6 +74,7 @@ add_executable(sample_alpha
     orderbook.cpp
     qr_model.cpp
     simulation.cpp
+    race.cpp
 )
 
 target_link_libraries(sample_alpha

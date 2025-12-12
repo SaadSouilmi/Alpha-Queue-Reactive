@@ -190,42 +190,11 @@ struct Accumulator {
     }
 };
 
-// Constants
-constexpr int32_t HOURLY_VOL = 1000;
-constexpr int32_t MAX_ORDER_SIZE = 5;
-constexpr int64_t METAORDER_DURATION_NS = 5LL * 60 * 1'000'000'000;  // 5 minutes in nanoseconds
-
-// Build metaorder: total_vol spread over 5 minutes, max size per order = 5
-// First order at t=0, last order at t=5min
-MetaOrder build_metaorder(int32_t total_vol, Side side) {
-    MetaOrder metaorder;
-    metaorder.side = side;
-
-    // Calculate number of orders needed (ceil division)
-    int num_orders = (total_vol + MAX_ORDER_SIZE - 1) / MAX_ORDER_SIZE;
-    if (num_orders == 0) num_orders = 1;
-
-    // Time interval between orders (so last order lands at exactly 5 min)
-    // For n orders: t=0, t=interval, ..., t=(n-1)*interval = 5min
-    int64_t interval = (num_orders > 1) ? METAORDER_DURATION_NS / (num_orders - 1) : 0;
-
-    int32_t remaining = total_vol;
-    for (int i = 0; i < num_orders; i++) {
-        int64_t t = static_cast<int64_t>(i) * interval;
-        int32_t size = std::min(remaining, MAX_ORDER_SIZE);
-        metaorder.timestamps.push_back(t);
-        metaorder.sizes.push_back(size);
-        remaining -= size;
-    }
-
-    return metaorder;
-}
-
 void run_and_accumulate(const std::string& data_path, const QueueDistributions& dists,
                         const DeltaT* delta_t, const TradeIndices& trd_idx,
                         const std::vector<LOBConfig>& lob_configs,
                         double ema_alpha, double ema_m,
-                        uint64_t seed, int64_t duration, int32_t metaorder_vol, Accumulator& acc) {
+                        uint64_t seed, int64_t duration, Accumulator& acc) {
     // Pick random LOB config based on seed
     std::mt19937_64 rng(seed);
     size_t config_idx = rng() % lob_configs.size();
@@ -252,18 +221,10 @@ void run_and_accumulate(const std::string& data_path, const QueueDistributions& 
     // EMAImpact with configurable alpha and m
     EMAImpact impact(ema_alpha, ema_m);
 
-		// NoImpact
-		// NoImpact impact;
-
-    // Build metaorder based on volume
-    MetaOrder metaorder = build_metaorder(metaorder_vol, Side::Ask);
-
-    // Inline run_metaorder to capture trade probs
+    // Run simulation without metaorder - just QR model
     Buffer buffer;
     std::vector<TradeProbRecord> prob_records;
     int64_t time = 0;
-    size_t meta_i = 0;
-    size_t meta_n = metaorder.timestamps.size();
     double current_bias = 0.0;
     double sign_sum = 0.0;
     int trade_count = 0;
@@ -286,16 +247,8 @@ void run_and_accumulate(const std::string& data_path, const QueueDistributions& 
         prob_records.push_back(prob_rec);
 
         int64_t dt = model.sample_dt();
-        if (meta_i < meta_n && time + dt >= metaorder.timestamps[meta_i]) {
-            time = metaorder.timestamps[meta_i];
-            int32_t price = (metaorder.side == Side::Bid) ? lob.best_bid() : lob.best_ask();
-            order = Order(OrderType::Trade, metaorder.side, price, metaorder.sizes[meta_i], time);
-            meta_i++;
-        }
-        else {
-            time += dt;
-            order = model.sample_order(time);
-        }
+        time += dt;
+        order = model.sample_order(time);
 
         EventRecord record;
         record.record_lob(lob);
@@ -365,7 +318,6 @@ int main(int argc, char* argv[]) {
     std::cout << "Computed trade indices\n";
 
     int num_sims = 100'000;
-    //int num_sims = 1;
     int num_threads = std::thread::hardware_concurrency();
 
     int64_t duration = static_cast<int64_t>(duration_min) * 60 * 1'000'000'000;
@@ -374,68 +326,43 @@ int main(int argc, char* argv[]) {
     std::cout << "Using " << num_threads << " threads\n";
     std::cout << "EMA impact: alpha=" << ema_alpha << ", m=" << ema_m << "\n";
     std::cout << "Grid: " << (duration / step + 1) << " points (500ms spacing)\n";
-    std::cout << "Duration: " << duration_min << " minutes, Metaorder execution: 5 minutes\n";
+    std::cout << "Duration: " << duration_min << " minutes (no metaorder)\n";
 
     std::filesystem::create_directories(base_results_path);
 
-    // Metaorder sizes: 2.5%, 5%, 10% of HOURLY_VOL
-    std::vector<std::pair<double, int32_t>> metaorder_configs = {
-        {2.5, static_cast<int32_t>(HOURLY_VOL * 0.025)},   // 25 shares
-        {5.0, static_cast<int32_t>(HOURLY_VOL * 0.05)},    // 50 shares
-        {10.0, static_cast<int32_t>(HOURLY_VOL * 0.10)}    // 100 shares
-    };
+    Accumulator acc(duration, step);
 
-    auto total_start = std::chrono::high_resolution_clock::now();
+    std::cout << "\n=== Running baseline (no metaorder) ===\n";
+    std::cout << "Starting (" << num_sims << " simulations)\n";
+    auto start = std::chrono::high_resolution_clock::now();
 
-    for (const auto& [pct, metaorder_vol] : metaorder_configs) {
-        std::cout << "\n=== Running metaorder " << pct << "% of hourly vol (" << metaorder_vol << " shares) ===\n";
+    for (int batch_start = 0; batch_start < num_sims; batch_start += num_threads) {
+        int batch_end = std::min(batch_start + num_threads, num_sims);
 
-        MetaOrder sample_meta = build_metaorder(metaorder_vol, Side::Ask);
-        std::cout << "  Orders: " << sample_meta.timestamps.size()
-                  << ", sizes: ";
-        for (size_t i = 0; i < std::min(sample_meta.sizes.size(), size_t(5)); i++) {
-            std::cout << sample_meta.sizes[i] << " ";
-        }
-        if (sample_meta.sizes.size() > 5) std::cout << "...";
-        std::cout << "\n";
-
-        Accumulator acc(duration, step);
-
-        std::cout << "Starting (" << num_sims << " simulations)\n";
-        auto start = std::chrono::high_resolution_clock::now();
-
-        for (int batch_start = 0; batch_start < num_sims; batch_start += num_threads) {
-            int batch_end = std::min(batch_start + num_threads, num_sims);
-
-            std::vector<std::future<void>> futures;
-            for (int i = batch_start; i < batch_end; i++) {
-                futures.push_back(std::async(std::launch::async, run_and_accumulate,
-                                              data_path, std::cref(dists), delta_t, std::cref(trd_idx), std::cref(lob_configs),
-                                              ema_alpha, ema_m, i, duration, metaorder_vol, std::ref(acc)));
-            }
-
-            for (auto& f : futures) {
-                f.get();
-            }
-
-            if (batch_start % 10000 == 0) {
-                std::cout << "  Progress: " << batch_start << "/" << num_sims << "\n";
-            }
+        std::vector<std::future<void>> futures;
+        for (int i = batch_start; i < batch_end; i++) {
+            futures.push_back(std::async(std::launch::async, run_and_accumulate,
+                                          data_path, std::cref(dists), delta_t, std::cref(trd_idx), std::cref(lob_configs),
+                                          ema_alpha, ema_m, i, duration, std::ref(acc)));
         }
 
-        std::string dt_suffix = use_mixture ? "_mix" : "_exp";
-        std::ostringstream oss;
-        oss << base_results_path << "/ema_impact_pct_" << static_cast<int>(pct * 10)
-            << "_a" << ema_alpha << "_m" << ema_m << dt_suffix << ".csv";
-        std::string out_path = oss.str();
-        acc.save_csv(out_path);
+        for (auto& f : futures) {
+            f.get();
+        }
 
-        auto end = std::chrono::high_resolution_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(end - start);
-        std::cout << "Completed " << pct << "% in " << elapsed.count() << " seconds\n";
+        if (batch_start % 10000 == 0) {
+            std::cout << "  Progress: " << batch_start << "/" << num_sims << "\n";
+        }
     }
 
-    auto total_end = std::chrono::high_resolution_clock::now();
-    auto total_elapsed = std::chrono::duration_cast<std::chrono::seconds>(total_end - total_start);
-    std::cout << "\nAll done in " << total_elapsed.count() << " seconds\n";
+    std::string dt_suffix = use_mixture ? "_mix" : "_exp";
+    std::ostringstream oss;
+    oss << base_results_path << "/baseline_a" << ema_alpha << "_m" << ema_m << dt_suffix << ".csv";
+    std::string out_path = oss.str();
+    acc.save_csv(out_path);
+
+    auto end = std::chrono::high_resolution_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(end - start);
+    std::cout << "Completed baseline in " << elapsed.count() << " seconds\n";
+    std::cout << "Output: " << out_path << "\n";
 }

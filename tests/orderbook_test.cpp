@@ -396,6 +396,93 @@ TEST_F(OrderBookTest, ImbalanceAfterTrade) {
 }
 
 // ============================================================================
+// Fill Recording Tests
+// ============================================================================
+
+TEST_F(OrderBookTest, FillsSingleLevel) {
+    std::vector<Fill> fills;
+    Order order(OrderType::Trade, Side::Bid, 1519, 3, 3000);
+    lob->process(order, &fills);
+
+    EXPECT_EQ(fills.size(), 1);
+    EXPECT_EQ(fills[0].price, 1519);
+    EXPECT_EQ(fills[0].size, 3);
+}
+
+TEST_F(OrderBookTest, FillsMultipleLevels) {
+    std::vector<Fill> fills;
+    // Sell through multiple levels: 5 @ 1519, 10 @ 1518, 1 @ 1517
+    Order order(OrderType::Trade, Side::Bid, 1517, 16, 3000);
+    lob->process(order, &fills);
+
+    EXPECT_EQ(fills.size(), 3);
+    EXPECT_EQ(fills[0].price, 1519);
+    EXPECT_EQ(fills[0].size, 5);
+    EXPECT_EQ(fills[1].price, 1518);
+    EXPECT_EQ(fills[1].size, 10);
+    EXPECT_EQ(fills[2].price, 1517);
+    EXPECT_EQ(fills[2].size, 1);
+}
+
+TEST_F(OrderBookTest, FillsMultipleLevelsBuy) {
+    std::vector<Fill> fills;
+    // Buy through multiple levels: 3 @ 1520, 17 @ 1521
+    Order order(OrderType::Trade, Side::Ask, 1521, 20, 3000);
+    lob->process(order, &fills);
+
+    EXPECT_EQ(fills.size(), 2);
+    EXPECT_EQ(fills[0].price, 1520);
+    EXPECT_EQ(fills[0].size, 3);
+    EXPECT_EQ(fills[1].price, 1521);
+    EXPECT_EQ(fills[1].size, 17);
+}
+
+TEST_F(OrderBookTest, FillsWithPartialResting) {
+    std::vector<Fill> fills;
+    // Sell 10 @ 1519, but only 5 available -> 5 filled, 5 rests
+    Order order(OrderType::Trade, Side::Bid, 1519, 10, 3000);
+    lob->process(order, &fills);
+
+    EXPECT_EQ(fills.size(), 1);
+    EXPECT_EQ(fills[0].price, 1519);
+    EXPECT_EQ(fills[0].size, 5);
+    EXPECT_TRUE(order.partial);
+
+    // Verify resting size can be computed
+    int32_t resting = order.size;
+    for (const auto& f : fills) resting -= f.size;
+    EXPECT_EQ(resting, 5);
+}
+
+TEST_F(OrderBookTest, FillsNullptrDoesNotCrash) {
+    // Passing nullptr should still work (no fills recorded)
+    Order order(OrderType::Trade, Side::Bid, 1519, 3, 3000);
+    lob->process(order, nullptr);
+
+    EXPECT_FALSE(order.rejected);
+    EXPECT_EQ(lob->best_bid_vol(), 2);  // 5 - 3
+}
+
+TEST_F(OrderBookTest, FillsRejectedOrder) {
+    std::vector<Fill> fills;
+    // Price above best bid -> rejected
+    Order order(OrderType::Trade, Side::Bid, 1525, 10, 3000);
+    lob->process(order, &fills);
+
+    EXPECT_TRUE(order.rejected);
+    EXPECT_EQ(fills.size(), 0);
+}
+
+TEST_F(OrderBookTest, FillsNonTradeOrder) {
+    std::vector<Fill> fills;
+    // Add order - fills should remain empty
+    Order order(OrderType::Add, Side::Bid, 1519, 10, 1000);
+    lob->process(order, &fills);
+
+    EXPECT_EQ(fills.size(), 0);
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 

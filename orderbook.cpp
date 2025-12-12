@@ -99,7 +99,7 @@ int32_t OrderBook::best_ask_vol() const {
     return ask_.begin()->second;
 }
 
-void OrderBook::process(Order& order) {
+void OrderBook::process(Order& order, std::vector<Fill>* fills) {
     switch (order.type) {
         case OrderType::Add:
             apply_add(order);
@@ -108,7 +108,7 @@ void OrderBook::process(Order& order) {
             apply_cancel(order);
             break;
         case OrderType::Trade:
-            apply_trade(order);
+            apply_trade(order, fills);
             break;
         case OrderType::CreateBid:
             apply_create_bid(order);
@@ -159,11 +159,11 @@ void OrderBook::apply_cancel(Order& order) {
     }
 }
 
-void OrderBook::apply_trade(Order& order) {
+void OrderBook::apply_trade(Order& order, std::vector<Fill>* fills) {
     if (order.side == Side::Bid) {
-        sweep_bid(order);
+        sweep_bid(order, fills);
     } else {
-        sweep_ask(order);
+        sweep_ask(order, fills);
     }
 }
 
@@ -180,7 +180,7 @@ void OrderBook::apply_create_ask(Order& order) {
 }
 
 
-void OrderBook::sweep_bid(Order& order) {
+void OrderBook::sweep_bid(Order& order, std::vector<Fill>* fills) {
     int32_t remaining = order.size;
 
     if (bid_.empty() || order.price > best_bid()) {
@@ -198,6 +198,10 @@ void OrderBook::sweep_bid(Order& order) {
         }
 
         int32_t traded = std::min(remaining, available);
+
+        if (fills) {
+            fills->push_back({curr_price, traded});
+        }
 
         remaining -= traded;
 
@@ -225,7 +229,7 @@ void OrderBook::sweep_bid(Order& order) {
     }
 }
 
-void OrderBook::sweep_ask(Order& order) {
+void OrderBook::sweep_ask(Order& order, std::vector<Fill>* fills) {
     int32_t remaining = order.size;
 
     if (ask_.empty() || order.price < best_ask()) {
@@ -243,6 +247,10 @@ void OrderBook::sweep_ask(Order& order) {
         }
 
         int32_t traded = std::min(remaining, available);
+
+        if (fills) {
+            fills->push_back({curr_price, traded});
+        }
 
         remaining -= traded;
 

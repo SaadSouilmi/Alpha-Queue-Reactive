@@ -132,7 +132,7 @@ QRParams::QRParams(const std::string& path) {
 
 SizeDistributions::SizeDistributions(const std::string& csv_path) {
     // Load size distribution parameters
-    // Format: imb_bin,event,event_q,p
+    // Format: imb_bin,event,event_q,p,spread
     std::ifstream file(csv_path);
     if (!file.is_open()) {
         throw std::runtime_error("Cannot open size_distrib.csv: " + csv_path);
@@ -150,47 +150,47 @@ SizeDistributions::SizeDistributions(const std::string& csv_path) {
         double imb_bin_val = std::stod(token);
         int imb_bin = imb_bin_to_index(imb_bin_val);
 
-        // event type (Add, Can, Trd)
+        // event type
         std::getline(ss, token, ',');
-        int type_idx;
-        if (token == "Add") type_idx = 0;
-        else if (token == "Can") type_idx = 1;
-        else if (token == "Trd") type_idx = 2;
-        else continue;  // skip unknown types
+        std::string event_str = token;
 
-        // event_q (queue number: 1 or 2)
+        // event_q (queue number: 0, 1, or 2)
         std::getline(ss, token, ',');
         int queue = std::stoi(token);
-        int queue_idx = queue - 1;  // 1->0, 2->1
 
         // p (geometric distribution parameter)
         std::getline(ss, token, ',');
         double p = std::stod(token);
 
-        if (imb_bin >= 0 && imb_bin < NUM_IMB_BINS && queue_idx >= 0 && queue_idx < 2) {
-            p_params[imb_bin][type_idx][queue_idx] = p;
+        // spread (1 or 2)
+        std::getline(ss, token, ',');
+        int spread = std::stoi(token);
+
+        if (imb_bin < 0 || imb_bin >= NUM_IMB_BINS) continue;
+
+        if (spread == 1) {
+            // Spread=1: Add, Can, Trd at queue 1 or 2
+            int type_idx;
+            if (event_str == "Add") type_idx = 0;
+            else if (event_str == "Can") type_idx = 1;
+            else if (event_str == "Trd") type_idx = 2;
+            else continue;
+
+            int queue_idx = queue - 1;  // 1->0, 2->1
+            if (queue_idx >= 0 && queue_idx < 2) {
+                p_params[imb_bin][type_idx][queue_idx] = p;
+            }
+        } else if (spread == 2) {
+            // Spread>=2: Create_Bid, Create_Ask
+            int create_idx;
+            if (event_str == "Create_Bid") create_idx = 0;
+            else if (event_str == "Create_Ask") create_idx = 1;
+            else continue;
+
+            p_create[imb_bin][create_idx] = p;
         }
     }
     file.close();
-}
-
-// ============================================================================
-// OUAlpha Implementation
-// ============================================================================
-
-OUAlpha::OUAlpha(double kappa_per_min, double s, uint64_t seed)
-    : kappa_(kappa_per_min / (60.0 * 1e9)),  // convert min^-1 to ns^-1
-      sigma_(s * std::sqrt(2.0 * kappa_)),
-      alpha_(0.0),
-      rng_(seed) {}
-
-void OUAlpha::step(int64_t dt_ns) {
-    double dt = static_cast<double>(dt_ns);
-    double decay = std::exp(-kappa_ * dt);
-    // Variance of the conditional distribution: σ²(1 - e^{-2κdt})/(2κ)
-    double var = (sigma_ * sigma_) * (1.0 - decay * decay) / (2.0 * kappa_);
-    double std_dev = std::sqrt(var);
-    alpha_ = alpha_ * decay + std_dev * normal_(rng_);
 }
 
 }

@@ -27,6 +27,11 @@ namespace qr {
         }
     };
 
+    struct Fill {
+        int32_t price;
+        int32_t size;
+    };
+
     struct Order {
         OrderType type;
         Side side;
@@ -57,7 +62,7 @@ namespace qr {
                   const std::vector<int32_t>& ask_prices,
                   const std::vector<int32_t>& ask_vols);
 
-        void process(Order& order);
+        void process(Order& order, std::vector<Fill>* fills = nullptr);
 
         int32_t best_bid() const;
         int32_t best_ask() const;
@@ -81,12 +86,12 @@ namespace qr {
 
         void apply_add(Order& order);
         void apply_cancel(Order& order);
-        void apply_trade(Order& order);
+        void apply_trade(Order& order, std::vector<Fill>* fills);
         void apply_create_bid(Order& order);
         void apply_create_ask(Order& order);
 
-        void sweep_bid(Order& order);
-        void sweep_ask(Order& order);
+        void sweep_bid(Order& order, std::vector<Fill>* fills);
+        void sweep_ask(Order& order, std::vector<Fill>* fills);
 
         void clean_bid();
         void clean_ask();
