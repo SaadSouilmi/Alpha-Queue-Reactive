@@ -91,21 +91,21 @@ void Buffer::save_parquet(const std::string& path) const {
 
     auto schema = arrow::schema({
         arrow::field("sequence", arrow::int64()),
-        arrow::field("best_bid_price", arrow::int32()),
-        arrow::field("best_bid_vol", arrow::int32()),
-        arrow::field("best_ask_price", arrow::int32()),
-        arrow::field("best_ask_vol", arrow::int32()),
-        arrow::field("second_bid_price", arrow::int32()),
-        arrow::field("second_bid_vol", arrow::int32()),
-        arrow::field("second_ask_price", arrow::int32()),
-        arrow::field("second_ask_vol", arrow::int32()),
-        arrow::field("imbalance", arrow::float64()),
+        arrow::field("P_-1", arrow::int32()),
+        arrow::field("Q_-1", arrow::int32()),
+        arrow::field("P_1", arrow::int32()),
+        arrow::field("Q_1", arrow::int32()),
+        arrow::field("P_-2", arrow::int32()),
+        arrow::field("Q_-2", arrow::int32()),
+        arrow::field("P_2", arrow::int32()),
+        arrow::field("Q_2", arrow::int32()),
+        arrow::field("imb", arrow::float64()),
         arrow::field("mid", arrow::float64()),
-        arrow::field("timestamp", arrow::int64()),
-        arrow::field("type", arrow::utf8()),
-        arrow::field("side", arrow::int8()),
+        arrow::field("ts_event", arrow::int64()),
+        arrow::field("event", arrow::utf8()),
+        arrow::field("event_side", arrow::int8()),
         arrow::field("price", arrow::int32()),
-        arrow::field("volume", arrow::int32()),
+        arrow::field("event_size", arrow::int32()),
         arrow::field("rejected", arrow::boolean()),
         arrow::field("partial", arrow::boolean()),
         arrow::field("bias", arrow::float64()),
@@ -254,9 +254,9 @@ Buffer run_metaorder(OrderBook& lob, QRModel& model, MarketImpact& impact, MetaO
 
 void AlphaPnL::save_csv(const std::string& path) const {
     std::ofstream file(path);
-    file << "lag_sec,alpha_return_cov,alpha_logreturn_cov,alpha_tickreturn_cov\n";
+    file << "lag_sec,alpha_tickreturn_cov\n";
     for (size_t i = 0; i < lag_sec.size(); i++) {
-        file << lag_sec[i] << "," << alpha_return_cov[i] << "," << alpha_logreturn_cov[i] << "," << alpha_tickreturn_cov[i] << "\n";
+        file << lag_sec[i] << "," << alpha_tickreturn_cov[i] << "\n";
     }
 }
 
@@ -278,29 +278,23 @@ AlphaPnL compute_alpha_pnl(const Buffer& buffer, const std::vector<int64_t>& lag
 
     // Compute for each lag
     for (int64_t lag : lags_ns) {
-        double sum = 0.0;
-        double sum_log = 0.0;
         double sum_tick = 0.0;
         size_t count = 0;
         size_t j = 0;
 
         for (size_t i = 0; i < n; i++) {
+            if (records[i].rejected) continue;
             int64_t target = timestamps[i] + lag;
             while (j < n && timestamps[j] < target) j++;
-            if (j < n && mid[i] > 0.0 && mid[j] > 0.0) {  // skip negative/zero mid
-                double ret = (mid[j] - mid[i]) / mid[i];
-                double log_ret = std::log(mid[j] / mid[i]);
+            while (j < n && records[j].rejected) j++;
+            if (j < n && mid[i] > 0.0 && mid[j] > 0.0) {
                 double tick_ret = mid[j] - mid[i];
-                sum += alpha[i] * ret;
-                sum_log += alpha[i] * log_ret;
                 sum_tick += alpha[i] * tick_ret;
                 count++;
             }
         }
 
         result.lag_sec.push_back(static_cast<double>(lag) / 1e9);
-        result.alpha_return_cov.push_back(count > 0 ? sum / static_cast<double>(count) : 0.0);
-        result.alpha_logreturn_cov.push_back(count > 0 ? sum_log / static_cast<double>(count) : 0.0);
         result.alpha_tickreturn_cov.push_back(count > 0 ? sum_tick / static_cast<double>(count) : 0.0);
     }
 

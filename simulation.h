@@ -88,8 +88,6 @@ namespace qr {
     // Alpha PnL computation
     struct AlphaPnL {
         std::vector<double> lag_sec;
-        std::vector<double> alpha_return_cov;
-        std::vector<double> alpha_logreturn_cov;
         std::vector<double> alpha_tickreturn_cov;
 
         void save_csv(const std::string& path) const;

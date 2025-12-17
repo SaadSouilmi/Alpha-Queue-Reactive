@@ -96,7 +96,9 @@ struct TradeProbRecord {
 struct Accumulator {
     std::vector<int64_t> grid;
     std::vector<double> mid_sum;
+    std::vector<double> mid_sum_sq;
     std::vector<double> bias_sum;
+    std::vector<double> bias_sum_sq;
     std::vector<double> sign_mean_sum;
     // Trade prob sums per bin: [bin][grid_point]
     std::array<std::vector<double>, QRParams::NUM_IMB_BINS> bid_trade_prob_sum;
@@ -109,7 +111,9 @@ struct Accumulator {
             grid.push_back(t);
 
             mid_sum.push_back(0.0);
+            mid_sum_sq.push_back(0.0);
             bias_sum.push_back(0.0);
+            bias_sum_sq.push_back(0.0);
             sign_mean_sum.push_back(0.0);
         }
         for (int bin = 0; bin < QRParams::NUM_IMB_BINS; bin++) {
@@ -163,7 +167,9 @@ struct Accumulator {
         std::lock_guard<std::mutex> lock(mtx);
         for (size_t i = 0; i < grid.size(); i++) {
             mid_sum[i] += proj_mid[i];
+            mid_sum_sq[i] += proj_mid[i] * proj_mid[i];
             bias_sum[i] += proj_bias[i];
+            bias_sum_sq[i] += proj_bias[i] * proj_bias[i];
             sign_mean_sum[i] += proj_sign_mean[i];
             for (int bin = 0; bin < QRParams::NUM_IMB_BINS; bin++) {
                 bid_trade_prob_sum[bin][i] += proj_bid_prob[bin][i];
@@ -175,13 +181,21 @@ struct Accumulator {
 
     void save_csv(const std::string& path) {
         std::ofstream file(path);
-        file << "timestamp,avg_mid_price_change,avg_bias,avg_trade_sign_mean";
+        file << "timestamp,avg_mid_price_change,mid_price_change_se,avg_bias,bias_se,avg_trade_sign_mean";
         for (int bin = 0; bin < QRParams::NUM_IMB_BINS; bin++) {
             file << ",bin_" << bin << "_bid_trade_prob,bin_" << bin << "_ask_trade_prob";
         }
         file << "\n";
         for (size_t i = 0; i < grid.size(); i++) {
-            file << grid[i] << "," << (mid_sum[i] / count) << "," << (bias_sum[i] / count) << "," << (sign_mean_sum[i] / count);
+            double mid_mean = mid_sum[i] / count;
+            double mid_var = mid_sum_sq[i] / count - mid_mean * mid_mean;
+            double mid_se = std::sqrt(mid_var / count);
+
+            double bias_mean = bias_sum[i] / count;
+            double bias_var = bias_sum_sq[i] / count - bias_mean * bias_mean;
+            double bias_se = std::sqrt(bias_var / count);
+
+            file << grid[i] << "," << mid_mean << "," << mid_se << "," << bias_mean << "," << bias_se << "," << (sign_mean_sum[i] / count);
             for (int bin = 0; bin < QRParams::NUM_IMB_BINS; bin++) {
                 file << "," << (bid_trade_prob_sum[bin][i] / count) << "," << (ask_trade_prob_sum[bin][i] / count);
             }

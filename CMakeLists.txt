@@ -13,6 +13,7 @@ endif()
 # Find Arrow and Parquet
 find_package(Arrow REQUIRED)
 find_package(Parquet REQUIRED)
+find_package(Threads REQUIRED)
 
 # Fetch Google Test
 include(FetchContent)
@@ -52,6 +53,7 @@ add_executable(run_metaorder
 target_link_libraries(run_metaorder
     Arrow::arrow_shared
     Parquet::parquet_shared
+		Threads::Threads
 )
 
 # Baseline simulation executable (no metaorder)
