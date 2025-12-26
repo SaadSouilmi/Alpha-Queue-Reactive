@@ -163,12 +163,6 @@ std::vector<Order> LogisticRace::generate_racers(double alpha, int64_t base_time
                                                   std::mt19937_64& rng) {
     std::vector<Order> racers;
 
-    // Determine side based on alpha direction
-    // α > 0 → racers target ask side (sells)
-    // α < 0 → racers target bid side (buys)
-    Side side = (alpha > 0) ? Side::Ask : Side::Bid;
-    int32_t price = (side == Side::Ask) ? best_ask : best_bid;
-
     // Sample number of racers (scales with |α|)
     int num_racers = params_.sample_num_racers(alpha, rng);
 
@@ -177,11 +171,41 @@ std::vector<Order> LogisticRace::generate_racers(double alpha, int64_t base_time
 
     std::uniform_real_distribution<double> uniform(0.0, 1.0);
 
-    for (int i = 0; i < num_racers; ++i) {
-        // Determine order type: 70% trades, 30% cancels
-        OrderType type = (uniform(rng) < params_.trade_prob) ? OrderType::Trade : OrderType::Cancel;
+    // Cumulative thresholds for order type sampling
+    double thresh_trade = params_.trade_prob;
+    double thresh_limit_next = thresh_trade + params_.limit_next_prob;
 
-        // Sample racer size from geometric distribution
+    for (int i = 0; i < num_racers; ++i) {
+        double r = uniform(rng);
+        OrderType type;
+        Side side;
+        int32_t price;
+
+        if (r < thresh_trade) {
+            // TRADE: marketable limit at best_ask/best_bid at race trigger
+            // If late (quote moved), naturally rests as limit via partial fill
+            // α > 0 → buy (hit ask), α < 0 → sell (hit bid)
+            type = OrderType::Trade;
+            side = (alpha > 0) ? Side::Bid : Side::Ask;
+            price = (side == Side::Bid) ? best_ask : best_bid;
+
+        } else if (r < thresh_limit_next) {
+            // LIMIT AT Q_2: MM positioning at next level (opposite side)
+            // α > 0 → add ask at P_2 (queue priority for new best ask)
+            // α < 0 → add bid at P_-2 (queue priority for new best bid)
+            type = OrderType::Add;
+            side = (alpha > 0) ? Side::Ask : Side::Bid;
+            price = (side == Side::Ask) ? (best_ask + 1) : (best_bid - 1);
+
+        } else {
+            // CANCEL: pull quotes to avoid adverse selection
+            // α > 0 → cancel asks (avoid being picked off)
+            // α < 0 → cancel bids
+            type = OrderType::Cancel;
+            side = (alpha > 0) ? Side::Ask : Side::Bid;
+            price = (side == Side::Ask) ? best_ask : best_bid;
+        }
+
         int32_t size = params_.sample_racer_size(rng);
         racers.emplace_back(type, side, price, size, time);
 

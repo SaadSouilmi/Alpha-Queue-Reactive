@@ -68,6 +68,7 @@ add_executable(run_baseline
 target_link_libraries(run_baseline
     Arrow::arrow_shared
     Parquet::parquet_shared
+		Threads::Threads
 )
 
 # Sample with alpha executable

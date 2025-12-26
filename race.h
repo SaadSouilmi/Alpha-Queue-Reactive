@@ -46,7 +46,13 @@ struct RaceParams {
     double min_threshold = 0.8;   // no race if |α| < this
     double threshold = 0.7;       // logistic inflection point
     double steepness = 8.0;       // logistic steepness
-    double trade_prob = 0.3;      // 30% trades, 70% cancels
+
+    // Order type probabilities (must sum to <= 1, remainder is cancels)
+    // Races only trigger at spread = 1
+    double trade_prob = 0.45;       // 45% trades (if late, naturally rest as limits)
+    double limit_next_prob = 0.30;  // 30% MM repositioning at Q_2
+    // cancel_prob = 0.25           // 25% cancels (implicit)
+
     double base_mean_racers = 4.0;  // base geometric mean for number of racers
     double racer_scale = 2.5;       // scale factor: mean = base + scale * (|α| - threshold)
     double mean_size = 3.0;       // geometric mean for racer size

@@ -179,7 +179,7 @@ def main() -> None:
     from lobib import preprocessing as pr, DataLoader
 
     loader = DataLoader()
-    tickers = ["BB", "AMC", "NOK"]
+    tickers = ["T", "PFE", "VZ", "INTC"]
     info = loader.ticker_info(*tickers)
     files = info.filter(pl.col("schema").eq("mbp-10-raw"))["file"].to_list()
 

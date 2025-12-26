@@ -11,8 +11,16 @@
 using namespace qr;
 
 int main(int argc, char* argv[]) {
-    std::string data_path = "/home/labcmap/saad.souilmi/dev_cpp/qr/data/AAL2";
-    std::string output_path = "/home/labcmap/saad.souilmi/dev_cpp/qr/data/results/result.parquet";
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <ticker> [options]\n";
+        std::cerr << "Options: --seed <seed> --mix --race --weibull --gamma\n";
+        return 1;
+    }
+
+    std::string base_path = "/home/labcmap/saad.souilmi/dev_cpp/qr/data";
+    std::string ticker = argv[1];
+    std::string data_path = base_path + "/" + ticker;
+    std::string output_path = base_path + "/results/result.parquet";
 
     // Parse flags: --seed [seed], --mix, --race, --weibull, --gamma
     uint64_t master_seed = std::random_device{}();
@@ -20,7 +28,7 @@ int main(int argc, char* argv[]) {
     bool use_race = false;
     bool use_weibull = true;  // default to weibull
 
-    for (int i = 1; i < argc; ++i) {
+    for (int i = 2; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--seed" && i + 1 < argc) {
             master_seed = std::stoull(argv[++i]);
@@ -34,6 +42,8 @@ int main(int argc, char* argv[]) {
             use_weibull = false;
         }
     }
+
+    std::cout << "Using ticker: " << ticker << "\n";
 
     // Generate seeds for each component
     std::mt19937_64 seed_rng(master_seed);

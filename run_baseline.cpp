@@ -272,15 +272,23 @@ void run_and_accumulate(const std::string& data_path, const QueueDistributions& 
 }
 
 int main(int argc, char* argv[]) {
-    std::string data_path = "/home/labcmap/saad.souilmi/dev_cpp/qr/data/AAL2";
-    std::string base_results_path = "/home/labcmap/saad.souilmi/dev_cpp/qr/data/results";
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <ticker> [options]\n";
+        std::cerr << "Options: --mix --alpha <val> --m <val> --duration <min>\n";
+        return 1;
+    }
+
+    std::string base_path = "/home/labcmap/saad.souilmi/dev_cpp/qr/data";
+    std::string ticker = argv[1];
+    std::string data_path = base_path + "/" + ticker;
+    std::string base_results_path = base_path + "/results";
 
     // Parse flags: --mix, --alpha, --m, --duration
     bool use_mixture = false;
     double ema_alpha = 0.005;
     double ema_m = 4.5;
     int duration_min = 30;
-    for (int i = 1; i < argc; ++i) {
+    for (int i = 2; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--mix") {
             use_mixture = true;
@@ -292,6 +300,8 @@ int main(int argc, char* argv[]) {
             duration_min = std::stoi(argv[++i]);
         }
     }
+
+    std::cout << "Using ticker: " << ticker << "\n";
 
     // Load queue distributions once
     QueueDistributions dists(data_path + "/inv_distributions_qmax30.csv");

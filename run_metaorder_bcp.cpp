@@ -108,9 +108,18 @@ void run_and_accumulate(const std::string& data_path, const QueueDistributions& 
     acc.add(result);
 }
 
-int main() {
-    std::string data_path = "/home/labcmap/saad.souilmi/dev_cpp/qr/data/AAL2";
-    std::string base_results_path = "/home/labcmap/saad.souilmi/dev_cpp/qr/data/results";
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <ticker>\n";
+        return 1;
+    }
+
+    std::string base_path = "/home/labcmap/saad.souilmi/dev_cpp/qr/data";
+    std::string ticker = argv[1];
+    std::string data_path = base_path + "/" + ticker;
+    std::string base_results_path = base_path + "/results";
+
+    std::cout << "Using ticker: " << ticker << "\n";
 
     // Load queue distributions once
     QueueDistributions dists(data_path + "/inv_distributions_qmax30.csv");

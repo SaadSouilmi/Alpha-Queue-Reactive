@@ -1,0 +1,83 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+
+\title{Queue-Reactive Model: Empirical vs Simulated}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-1cm}
+
+\section*{Time Between Events}
+Distribution of $\log_{10}(\Delta t)$ in nanoseconds for all order book events.
+\begin{center}
+\includegraphics[width=0.75\textwidth]{fit/dt_distribution.pdf}
+\end{center}
+
+\section*{Inter-Trade Time}
+Distribution of $\log_{10}(\Delta t)$ filtered to trades only.
+\begin{center}
+\includegraphics[width=0.75\textwidth]{fit/inter_trade_time.pdf}
+\end{center}
+
+\section*{Order Book Imbalance}
+Binned imbalance $I = \frac{Q^b - Q^a}{Q^b + Q^a}$ at the best bid/ask levels.
+\begin{center}
+\includegraphics[width=0.75\textwidth]{fit/imbalance_distribution.pdf}
+\end{center}
+
+\section*{Spread Distribution}
+Distribution of bid-ask spread in ticks.
+\begin{center}
+\includegraphics[width=0.75\textwidth]{fit/spread_distribution.pdf}
+\end{center}
+
+\section*{Queue Size at BBO}
+Distribution of queue sizes at best bid ($Q_{-1}$) and best ask ($Q_1$).
+\begin{center}
+\includegraphics[width=\textwidth]{fit/queue_size_distribution.pdf}
+\end{center}
+
+\section*{Event Type Distribution}
+Left: all events. Right: fast events only ($\Delta t < \delta$).
+\begin{center}
+\includegraphics[width=\textwidth]{fit/event_type_distribution.pdf}
+\end{center}
+
+\section*{Daily Event Count}
+Number of events per trading day (log scale).
+\begin{center}
+\includegraphics[width=0.75\textwidth]{fit/daily_events.pdf}
+\end{center}
+
+\section*{Hourly Traded Volume}
+Distribution of hourly traded volume in median event size units.
+\begin{center}
+\includegraphics[width=0.75\textwidth]{fit/hourly_volume.pdf}
+\end{center}
+
+\section*{Eta Coefficient}
+$\eta = \frac{N_c}{2 N_a}$ where $N_c$ is the number of mid-price continuations and $N_a$ the number of alternations per day.
+\begin{center}
+\includegraphics[width=0.75\textwidth]{fit/eta_distribution.pdf}
+\end{center}
+
+\section*{Daily Volatility}
+Volatility: $\hat\sigma = \sqrt{\frac{1}{N}\sum_{i}(\Delta p_i)^2}$ in ticks.
+\begin{center}
+\includegraphics[width=0.75\textwidth]{fit/volatility_distribution.pdf}
+\end{center}
+
+\section*{Alpha PnL}
+Expected alpha times future price change: $\mathbb{E}\left[\alpha_t \cdot (P_{t+\Delta t} - P_t)\right]$ vs horizon, comparing with and without an Impact model.
+\begin{center}
+\includegraphics[width=0.75\textwidth]{fit/alph_pnl.pdf}
+\end{center}
+
+\end{document}

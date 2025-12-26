@@ -11,8 +11,16 @@
 using namespace qr;
 
 int main(int argc, char* argv[]) {
-    std::string data_path = "/home/labcmap/saad.souilmi/dev_cpp/qr/data/AAL2";
-    std::string results_path = "/home/labcmap/saad.souilmi/dev_cpp/qr/data/results/";
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <ticker> [options]\n";
+        std::cerr << "Options: --impact [ema_impact|no_impact] --k <alpha_scale> --seed <seed> --race --weibull --gamma\n";
+        return 1;
+    }
+
+    std::string base_path = "/home/labcmap/saad.souilmi/dev_cpp/qr/data";
+    std::string ticker = argv[1];
+    std::string data_path = base_path + "/" + ticker;
+    std::string results_path = base_path + "/results/";
 
     // Parse flags: --impact [ema_impact|no_impact] --k [alpha_scale] --seed [seed] --race
     std::string impact_name = "no_impact";
@@ -21,7 +29,7 @@ int main(int argc, char* argv[]) {
     bool use_race = false;
     bool use_weibull = true;
 
-    for (int i = 1; i < argc; ++i) {
+    for (int i = 2; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--impact" && i + 1 < argc) {
             impact_name = argv[++i];
@@ -37,6 +45,8 @@ int main(int argc, char* argv[]) {
             use_weibull = false;
         }
     }
+
+    std::cout << "Using ticker: " << ticker << "\n";
 
     // Generate seeds for each component
     std::mt19937_64 seed_rng(master_seed);
