@@ -272,16 +272,30 @@ void run_and_accumulate(const std::string& data_path, const QueueDistributions& 
 }
 
 int main(int argc, char* argv[]) {
+    auto print_help = [&]() {
+        std::cout << "Usage: " << argv[0] << " <ticker> [options]\n";
+        std::cout << "Options:\n";
+        std::cout << "  --mix              Use mixture delta_t distribution\n";
+        std::cout << "  --alpha <val>      EMA impact alpha (default: 0.005)\n";
+        std::cout << "  --m <val>          EMA impact multiplier (default: 4.5)\n";
+        std::cout << "  --duration <min>   Simulation duration in minutes (default: 30)\n";
+        std::cout << "  -h, --help         Show this help message\n";
+    };
+
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <ticker> [options]\n";
-        std::cerr << "Options: --mix --alpha <val> --m <val> --duration <min>\n";
+        print_help();
         return 1;
+    }
+
+    if (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h") {
+        print_help();
+        return 0;
     }
 
     std::string base_path = "/home/labcmap/saad.souilmi/dev_cpp/qr/data";
     std::string ticker = argv[1];
     std::string data_path = base_path + "/" + ticker;
-    std::string base_results_path = base_path + "/results";
+    std::string base_results_path = base_path + "/results/" + ticker;
 
     // Parse flags: --mix, --alpha, --m, --duration
     bool use_mixture = false;
@@ -304,7 +318,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Using ticker: " << ticker << "\n";
 
     // Load queue distributions once
-    QueueDistributions dists(data_path + "/inv_distributions_qmax30.csv");
+    QueueDistributions dists(data_path + "/invariant_distributions_qmax50.csv");
     std::cout << "Loaded queue distributions\n";
 
     // Load delta_t based on flag

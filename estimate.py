@@ -7,6 +7,7 @@ from order book data for a given ticker.
 """
 
 import argparse
+import gc
 from functools import reduce
 from pathlib import Path
 
@@ -14,6 +15,8 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 import polars as pl
+from scipy.stats import gaussian_kde, norm as norm_dist, gamma as gamma_dist, weibull_min
+from sklearn.mixture import GaussianMixture
 
 from lobib import DataLoader
 
@@ -85,6 +88,12 @@ def preprocess(df: pl.DataFrame, median_sizes: dict[int, float]) -> pl.DataFrame
         .cast(int)
         .mul(pl.col("event_queue_nbr"))
         >= 0
+    )
+
+    # Filter rows with best_bid_nbr and best_ask_nbr in expected range
+    df = df.filter(
+        pl.col("best_bid_nbr").is_between(-10, -1)
+        & pl.col("best_ask_nbr").is_between(1, 10)
     )
     df = df.with_columns(pl.col("event").replace({"Trd_All": "Trd"}))
 
@@ -370,11 +379,11 @@ def estimate_size_distributions(df: pl.DataFrame, median_sizes: dict[int, float]
     return pl.DataFrame(results).sort(["imb_bin", "event", "event_q"]), stat
 
 
-def estimate_burst_sizes(raw_df: pl.DataFrame, median_sizes: dict[int, float]) -> tuple[pl.DataFrame, pl.DataFrame]:
+def estimate_burst_sizes(df: pl.DataFrame, median_sizes: dict[int, float]) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Estimate burst size distributions for Create events (spread >= 2).
 
     Args:
-        raw_df: Raw (unfiltered) dataframe for burst analysis
+        df: Preprocessed dataframe with imb, imb_bin, and event_q computed
         median_sizes: Median event sizes by queue level
 
     Returns:
@@ -382,41 +391,7 @@ def estimate_burst_sizes(raw_df: pl.DataFrame, median_sizes: dict[int, float]) -
     """
     q1_median = median_sizes[1]
 
-    # Compute imbalance (normalize by Q_1 median)
-    condlist = [pl.col("best_bid_nbr").eq(-i) for i in range(1, 11)]
-    choicelist = [pl.col(f"Q_{-i}") for i in range(1, 11)]
-    best_bid = pl_select(condlist, choicelist).alias("best_bid").truediv(q1_median).ceil()
-
-    condlist = [pl.col("best_ask_nbr").eq(i) for i in range(1, 11)]
-    choicelist = [pl.col(f"Q_{i}") for i in range(1, 11)]
-    best_ask = pl_select(condlist, choicelist).alias("best_ask").truediv(q1_median).ceil()
-    imb = ((best_bid - best_ask) / (best_bid + best_ask)).alias("imb")
-
-    df = raw_df.with_columns(imb)
-
-    # Bin imbalance
-    bins = np.arange(11, step=1) / 10
-    condlist = [
-        *[
-            pl.col("imb").ge(left) & pl.col("imb").lt(right)
-            for left, right in zip(-bins[1:][::-1], -bins[:-1][::-1])
-        ],
-        pl.col("imb").eq(0),
-        *[
-            pl.col("imb").gt(left) & pl.col("imb").le(right)
-            for left, right in zip(bins[:-1], bins[1:])
-        ],
-    ]
-    choicelist = [*(-bins[1:][::-1]), 0, *bins[1:]]
-    df = df.with_columns(pl_select(condlist, choicelist).alias("imb_bin"))
-
-    # Compute event_q
-    df = df.with_columns(
-        pl.when(pl.col("event_queue_nbr").lt(0))
-        .then(pl.col("event_queue_nbr").sub(pl.col("best_bid_nbr")).sub(1))
-        .otherwise(pl.col("event_queue_nbr").sub(pl.col("best_ask_nbr")).add(1))
-        .alias("event_q")
-    )
+    # Filter to events within Q_±2
     df = df.filter(pl.col("event_q").abs().le(2))
 
     # Group events into bursts
@@ -447,9 +422,6 @@ def estimate_burst_sizes(raw_df: pl.DataFrame, median_sizes: dict[int, float]) -
     burst_sizes = burst_sizes.with_columns(
         pl.col("total_size").truediv(q1_median).ceil().cast(int)
     )
-
-    # Filter out null imb_bin values
-    burst_sizes = burst_sizes.filter(pl.col("imb_bin").is_not_null())
 
     # Symmetrize: pool (imb=+x, Create_Ask) with (imb=-x, Create_Bid)
     # sign = sign(imb_bin) * sign(event) where Create_Ask=+1, Create_Bid=-1
@@ -499,6 +471,232 @@ def estimate_burst_sizes(raw_df: pl.DataFrame, median_sizes: dict[int, float]) -
     return pl.DataFrame(fit_results).sort(["imb_bin", "event"]), burst_sizes
 
 
+def estimate_invariant_distributions(
+    raw_df: pl.DataFrame, median_sizes: dict[int, float], q_max: int = 50
+) -> pl.DataFrame:
+    """Estimate invariant queue size distributions for Q_1 to Q_4.
+
+    For each queue level i, combines Q_i and Q_{-i}, normalizes by median
+    event size, and computes the empirical distribution truncated at q_max.
+
+    Args:
+        raw_df: Raw dataframe with Q_-10 to Q_10 columns
+        median_sizes: Median event sizes by queue level
+        q_max: Maximum queue size to include (truncate above this)
+
+    Returns:
+        DataFrame with columns: queue_level, q, probability
+    """
+    results = []
+
+    for i in range(1, 5):
+        median_i = median_sizes[i]
+
+        # Get Q_i and Q_{-i}, normalize by median, ceil to integers
+        q_pos = (raw_df[f"Q_{i}"] / median_i).ceil().cast(int)
+        q_neg = (raw_df[f"Q_{-i}"] / median_i).ceil().cast(int)
+
+        # Combine Q_i and Q_{-i}
+        all_q = pl.concat([q_pos, q_neg]).alias("q")
+
+        # Truncate at q_max and compute empirical distribution
+        counts = (
+            all_q.to_frame()
+            .filter(pl.col("q").le(q_max))
+            .group_by("q")
+            .len()
+            .sort("q")
+        )
+        total = counts["len"].sum()
+
+        for row in counts.iter_rows():
+            q_val, count = row
+            results.append({
+                "queue_level": i,
+                "q": q_val,
+                "probability": count / total,
+            })
+
+    return pl.DataFrame(results).sort(["queue_level", "q"])
+
+
+def compute_dt_data(df: pl.DataFrame) -> pl.DataFrame:
+    """Compute delta-t data lazily and return as DataFrame.
+
+    Args:
+        df: Preprocessed dataframe with ts_event column
+
+    Returns:
+        DataFrame with dt, dt_log, imb_bin, spread columns
+    """
+    return (
+        df.lazy()
+        .select(
+            pl.col("ts_event").diff().over("date").cast(int).alias("dt"),
+            "imb_bin", "spread"
+        )
+        .filter(pl.col("dt").gt(0))
+        .with_columns(pl.col("dt").log10().alias("dt_log"))
+        .collect()
+    )
+
+
+def estimate_delta_t_peak(dt_data: pl.DataFrame, sample_size: int = 500_000) -> pl.DataFrame:
+    """Estimate the peak region of log10(dt) distribution using KDE and fit a normal.
+
+    The peak region represents "normal" QR events (round-trip delta + reaction time).
+    Events below this region are considered "race" events.
+
+    Args:
+        dt_data: DataFrame with dt_log column (from compute_dt_data)
+        sample_size: Max samples for KDE (subsamples if larger)
+
+    Returns:
+        peak_params DataFrame with columns: mu, sigma, lower, upper
+    """
+    # Filter to exclude the QR tail (very slow events)
+    cutoff = 5.5
+    data = dt_data.lazy().filter(pl.col("dt_log").lt(cutoff)).select("dt_log").collect()["dt_log"].to_numpy()
+
+    # Subsample for KDE if too large
+    if len(data) > sample_size:
+        rng = np.random.default_rng(42)
+        data = rng.choice(data, size=sample_size, replace=False)
+
+    # Use KDE to find peak and 80% threshold bounds
+    kde = gaussian_kde(data)
+    x = np.linspace(data.min(), data.max(), 500)
+    y = kde(x)
+    peak_idx = np.argmax(y)
+    peak_val = y[peak_idx]
+
+    # Find where density drops to 80% of peak
+    threshold = 0.8 * peak_val
+    left_idx = np.where(y[:peak_idx] < threshold)[0][-1] if any(y[:peak_idx] < threshold) else 0
+    right_idx = peak_idx + np.where(y[peak_idx:] < threshold)[0][0] if any(y[peak_idx:] < threshold) else len(y) - 1
+
+    lower = x[left_idx]
+    upper = x[right_idx]
+
+    # Fit normal to data in peak region
+    peak_data = data[(data > lower) & (data < upper)]
+    mu, sigma = norm_dist.fit(peak_data)
+
+    return pl.DataFrame({
+        "mu": [mu],
+        "sigma": [sigma],
+        "lower": [lower],
+        "upper": [upper],
+    })
+
+
+def estimate_delta_t_mixtures(
+    dt_data: pl.DataFrame, floor_threshold: float = 0.0
+) -> pl.DataFrame:
+    """Fit 3-component Gaussian Mixture to log10(dt) for each (imb_bin, spread) pair.
+
+    Args:
+        dt_data: DataFrame with dt_log, imb_bin, spread columns (from compute_dt_data)
+        floor_threshold: Minimum log10(dt) value to include (0.0 for all, peak_upper for floored)
+
+    Returns:
+        DataFrame with GMM parameters: imb_bin, spread, w1-3, mu1-3, sigma1-3, n
+    """
+    # Apply floor threshold lazily
+    dt_filtered = dt_data.lazy().filter(pl.col("dt_log").gt(floor_threshold)).collect()
+
+    # Get unique imbalance bins and spreads
+    imb_bins = sorted(dt_filtered["imb_bin"].unique().drop_nulls().to_list())
+    spreads = sorted(dt_filtered["spread"].unique().to_list())
+
+    gmm_params = []
+    for imb_bin in imb_bins:
+        for spread in spreads:
+            # Get data for this (imb_bin, spread) pair
+            data = dt_filtered.filter(
+                (pl.col("imb_bin").eq(imb_bin)) & (pl.col("spread").eq(spread))
+            )["dt_log"].to_numpy()
+
+            if len(data) < 10:
+                continue
+
+            log_dt = data.reshape(-1, 1)
+
+            # Fit 3-component Gaussian mixture
+            gmm = GaussianMixture(n_components=3, random_state=42).fit(log_dt)
+
+            # Extract parameters
+            means = gmm.means_.flatten()
+            stds = np.sqrt(gmm.covariances_.flatten())
+            weights = gmm.weights_
+
+            # Store params (spread as 0 or 1 for C++ indexing)
+            gmm_params.append({
+                "imb_bin": imb_bin,
+                "spread": spread - 1,  # 0 for spread=1, 1 for spread>=2
+                "w1": weights[0], "mu1": means[0], "sigma1": stds[0],
+                "w2": weights[1], "mu2": means[1], "sigma2": stds[1],
+                "w3": weights[2], "mu3": means[2], "sigma3": stds[2],
+                "n": len(data)
+            })
+
+    return pl.DataFrame(gmm_params)
+
+
+def estimate_delta_t_left_tail(
+    dt_data: pl.DataFrame, max_log10: float
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Fit Gamma and Weibull distributions to the left tail (fast "race" events).
+
+    Args:
+        dt_data: DataFrame with dt_log column (from compute_dt_data)
+        max_log10: Maximum log10(dt) value for left tail (peak_lower from peak estimation)
+
+    Returns:
+        Tuple of (gamma_params, weibull_params) DataFrames
+    """
+    # Filter to left tail lazily
+    left_tail = (
+        dt_data.lazy()
+        .filter(pl.col("dt_log").lt(max_log10))
+        .select("dt_log")
+        .collect()["dt_log"]
+        .to_numpy()
+    )
+
+    if len(left_tail) < 10:
+        # Return empty DataFrames if not enough data
+        gamma_params = pl.DataFrame({"k": [0.0], "scale": [0.0], "shift": [0.0], "max_log10": [max_log10]})
+        weibull_params = pl.DataFrame({"k": [0.0], "scale": [0.0], "shift": [0.0], "max_log10": [max_log10]})
+        return gamma_params, weibull_params
+
+    # Shift data for fitting (both require x > 0)
+    shift = left_tail.min()
+    left_tail_shifted = left_tail - shift + 0.01
+
+    # Fit Gamma
+    k_gamma, _, scale_gamma = gamma_dist.fit(left_tail_shifted, floc=0)
+
+    # Fit Weibull
+    k_weibull, _, scale_weibull = weibull_min.fit(left_tail_shifted, floc=0)
+
+    gamma_params = pl.DataFrame({
+        "k": [k_gamma],
+        "scale": [scale_gamma],
+        "shift": [shift],
+        "max_log10": [max_log10],
+    })
+
+    weibull_params = pl.DataFrame({
+        "k": [k_weibull],
+        "scale": [scale_weibull],
+        "shift": [shift],
+        "max_log10": [max_log10],
+    })
+
+    return gamma_params, weibull_params
+
+
 # =============================================================================
 # Plotting Functions
 # =============================================================================
@@ -518,13 +716,13 @@ def plot_imbalance_distribution(df: pl.DataFrame, ticker: str) -> plt.Figure:
     return fig
 
 
-def plot_spread_distribution(df: pl.DataFrame, ticker: str) -> plt.Figure:
-    """Plot the distribution of spread (in ticks) - all events and trades only."""
+def plot_spread_distribution_from_stats(
+    spread_all: pl.DataFrame, spread_trades: pl.DataFrame, ticker: str
+) -> plt.Figure:
+    """Plot the distribution of spread using pre-computed stats."""
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 
     # Left: All events
-    spread_all = df.group_by("spread").len().sort("spread")
-    spread_all = spread_all.filter(pl.col("spread").le(20))
     total_all = spread_all["len"].sum()
     proportions_all = spread_all["len"] / total_all
     ax1.bar(spread_all["spread"], proportions_all, edgecolor="k", alpha=0.7)
@@ -533,9 +731,6 @@ def plot_spread_distribution(df: pl.DataFrame, ticker: str) -> plt.Figure:
     ax1.set_title("Spread Distribution - All Events")
 
     # Right: Trades only
-    trades_df = df.filter(pl.col("event").eq("Trd"))
-    spread_trades = trades_df.group_by("spread").len().sort("spread")
-    spread_trades = spread_trades.filter(pl.col("spread").le(20))
     total_trades = spread_trades["len"].sum()
     proportions_trades = spread_trades["len"] / total_trades
     ax2.bar(spread_trades["spread"], proportions_trades, edgecolor="k", alpha=0.7, color="tab:orange")
@@ -544,6 +739,26 @@ def plot_spread_distribution(df: pl.DataFrame, ticker: str) -> plt.Figure:
     ax2.set_title("Spread Distribution - Trades Only")
 
     fig.suptitle(f"{ticker} - Spread Distributions", fontsize=12, y=1.02)
+    plt.tight_layout()
+    return fig
+
+
+def plot_invariant_distributions(
+    invariant_dist: pl.DataFrame, ticker: str
+) -> plt.Figure:
+    """Plot invariant queue size distributions for Q_1 to Q_4."""
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    axes = axes.flatten()
+
+    for i, ax in enumerate(axes, start=1):
+        data = invariant_dist.filter(pl.col("queue_level").eq(i)).sort("q")
+        ax.bar(data["q"], data["probability"], edgecolor="k", alpha=0.7, width=0.8)
+        ax.set_xlabel("Queue Size (normalized)")
+        ax.set_ylabel("Probability")
+        ax.set_title(f"Q_{i} Invariant Distribution")
+        ax.set_xlim(0, 50)
+
+    fig.suptitle(f"{ticker} - Invariant Queue Distributions", fontsize=12, y=1.02)
     plt.tight_layout()
     return fig
 
@@ -774,59 +989,197 @@ def plot_burst_sizes(burst_sizes: pl.DataFrame, ticker: str) -> plt.Figure:
     return fig
 
 
-def generate_estimation_report(
-    df: pl.DataFrame,
-    raw_df: pl.DataFrame,
-    median_sizes: dict[int, float],
-    event_probs: pl.DataFrame,
-    intensities: pl.DataFrame,
-    dt_data: pl.DataFrame,
-    size_stat: pl.DataFrame,
-    burst_sizes: pl.DataFrame,
-    ticker: str,
-    output_path: Path,
-) -> None:
-    """Generate a PDF report with all estimation plots."""
-    print(f"Generating estimation report: {output_path}")
+def plot_delta_t_peak_fit(
+    dt_data: pl.DataFrame, peak_params: pl.DataFrame, ticker: str
+) -> plt.Figure:
+    """Plot the peak region fit: Gaussian fit (left) and full distribution with 80% region (right)."""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
+    mu = peak_params["mu"][0]
+    sigma = peak_params["sigma"][0]
+    lower = peak_params["lower"][0]
+    upper = peak_params["upper"][0]
+
+    # Get data
+    cutoff = 5.5
+    data = dt_data.filter(pl.col("dt_log").lt(cutoff))["dt_log"].to_numpy()
+    peak_data = data[(data > lower) & (data < upper)]
+
+    # Left: Gaussian fit to peak region
+    ax1.hist(peak_data, bins=50, density=True, alpha=0.5, color="gray", edgecolor="black", linewidth=0.3)
+    x = np.linspace(lower - 0.1, upper + 0.1, 200)
+    ax1.plot(x, norm_dist.pdf(x, mu, sigma), "b-", lw=2, label=f"N(μ={mu:.3f}, σ={sigma:.3f})")
+    ax1.axvline(lower, color="gray", linestyle=":", alpha=0.5)
+    ax1.axvline(upper, color="gray", linestyle=":", alpha=0.5)
+    ax1.set_xlabel("log₁₀(dt)")
+    ax1.set_ylabel("Density")
+    ax1.set_title("Peak Region: Gaussian Fit")
+    ax1.legend()
+
+    # Right: Full distribution with 80% density region shaded
+    ax2.hist(data, bins=100, density=True, alpha=0.5, color="steelblue", edgecolor="black", linewidth=0.3)
+    ax2.axvspan(lower, upper, alpha=0.3, color="coral", label=f"80% peak region [{lower:.2f}, {upper:.2f}]")
+    ax2.set_xlabel("log₁₀(dt)")
+    ax2.set_ylabel("Density")
+    ax2.set_title("Full Distribution with Peak Region")
+    ax2.legend()
+
+    fig.suptitle(f"{ticker} - Delta-t Peak Distribution", fontsize=12)
+    plt.tight_layout()
+    return fig
+
+
+def plot_delta_t_gmm_grid(
+    dt_data: pl.DataFrame, gmm_params: pl.DataFrame, floor_threshold: float, ticker: str
+) -> plt.Figure:
+    """Plot 7x6 grid of GMM fits for floored delta_t (21 imb_bins × 2 spreads)."""
+    # Get unique imbalance bins and spreads from gmm_params
+    imb_bins = sorted(gmm_params["imb_bin"].unique().to_list())
+    spreads = [0, 1]  # 0=spread1, 1=spread>=2
+
+    fig, axes = plt.subplots(7, 6, figsize=(20, 20))
+
+    for i, imb_bin in enumerate(imb_bins):
+        for j, spread in enumerate(spreads):
+            # Column: spread=0 uses cols 0,1,2; spread=1 uses cols 3,4,5
+            col = (i % 3) + (j * 3)
+            row = i // 3
+            ax = axes[row, col]
+
+            # Get GMM params for this (imb_bin, spread)
+            params = gmm_params.filter(
+                (pl.col("imb_bin").eq(imb_bin)) & (pl.col("spread").eq(spread))
+            )
+
+            if len(params) == 0:
+                ax.set_title(f"imb={imb_bin:.1f}, s={spread+1}", fontsize=8)
+                ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+                continue
+
+            # Get FLOORED data for this (imb_bin, spread) - same filter as GMM estimation
+            data = dt_data.filter(
+                (pl.col("imb_bin").eq(imb_bin)) &
+                (pl.col("spread").eq(spread + 1)) &
+                (pl.col("dt_log").gt(floor_threshold))
+            )["dt_log"].to_numpy()
+
+            if len(data) < 10:
+                ax.set_title(f"imb={imb_bin:.1f}, s={spread+1}", fontsize=8)
+                ax.text(0.5, 0.5, "Insufficient data", ha="center", va="center", transform=ax.transAxes)
+                continue
+
+            # Extract GMM parameters
+            w = [params["w1"][0], params["w2"][0], params["w3"][0]]
+            mu = [params["mu1"][0], params["mu2"][0], params["mu3"][0]]
+            sigma = [params["sigma1"][0], params["sigma2"][0], params["sigma3"][0]]
+
+            # Plot histogram of floored data
+            ax.hist(data, bins=50, density=True, alpha=0.5, color="gray")
+
+            # Plot GMM components
+            x = np.linspace(data.min() - 0.5, data.max() + 0.5, 200)
+            pdf_mix = np.zeros_like(x)
+            for k in range(3):
+                pdf_k = w[k] * norm_dist.pdf(x, mu[k], sigma[k])
+                ax.plot(x, pdf_k, "--", lw=1, label=f"w={w[k]:.2f}")
+                pdf_mix += pdf_k
+            ax.plot(x, pdf_mix, "r-", lw=1.5)
+
+            ax.set_title(f"imb={imb_bin:.1f}, s={spread+1} (n={params['n'][0]:,})", fontsize=8)
+            ax.legend(fontsize=6, loc="upper right")
+            ax.set_xlabel("log₁₀(dt)", fontsize=7)
+            ax.set_ylabel("Density", fontsize=7)
+            ax.tick_params(labelsize=6)
+
+    fig.suptitle(f"{ticker} - GMM Fits for log₁₀(dt) (floored at {floor_threshold:.2f})", fontsize=14)
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.95)
+    return fig
+
+
+def plot_delta_t_left_tail(
+    dt_data: pl.DataFrame, gamma_params: pl.DataFrame, weibull_params: pl.DataFrame, ticker: str
+) -> plt.Figure:
+    """Plot left tail fits: log10 space (left) and nanoseconds (right)."""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    max_log10 = gamma_params["max_log10"][0]
+    left_tail = dt_data.filter(pl.col("dt_log").lt(max_log10))["dt_log"].to_numpy()
+
+    if len(left_tail) < 10:
+        ax1.text(0.5, 0.5, "Insufficient data", ha="center", va="center", transform=ax1.transAxes)
+        ax2.text(0.5, 0.5, "Insufficient data", ha="center", va="center", transform=ax2.transAxes)
+        return fig
+
+    # Get params
+    k_gamma = gamma_params["k"][0]
+    scale_gamma = gamma_params["scale"][0]
+    k_weibull = weibull_params["k"][0]
+    scale_weibull = weibull_params["scale"][0]
+    shift = gamma_params["shift"][0]
+
+    # Left plot: log10 space
+    ax1.hist(left_tail, bins=80, alpha=0.6, color="steelblue", edgecolor="black", linewidth=0.5, density=True)
+    x_log = np.linspace(left_tail.min(), left_tail.max(), 200)
+    x_shifted = x_log - shift + 0.01
+
+    ax1.plot(x_log, gamma_dist.pdf(x_shifted, k_gamma, loc=0, scale=scale_gamma), "r-", lw=2,
+             label=f"Gamma(k={k_gamma:.2f}, θ={scale_gamma:.2f})")
+    ax1.plot(x_log, weibull_min.pdf(x_shifted, k_weibull, loc=0, scale=scale_weibull), "g-", lw=2,
+             label=f"Weibull(k={k_weibull:.2f}, λ={scale_weibull:.2f})")
+    ax1.axvline(max_log10, color="gray", linestyle="--", lw=1.5)
+    ax1.set_xlabel("log₁₀(dt)")
+    ax1.set_ylabel("Density")
+    ax1.set_title(f"Left Tail (n={len(left_tail):,})")
+    ax1.legend()
+
+    # Right plot: nanoseconds
+    ns_data = 10 ** left_tail
+    ns_min, ns_max = ns_data.min(), ns_data.max()
+
+    ax2.hist(ns_data, bins=80, alpha=0.6, color="coral", edgecolor="black", linewidth=0.5, density=True)
+
+    x_ns = np.linspace(ns_min, ns_max, 200)
+    x_log_t = np.log10(x_ns)
+    x_shifted_t = x_log_t - shift + 0.01
+
+    # Transform PDFs: f_Y(y) = f_X(log10(y)) / (y * ln(10))
+    pdf_gamma_ns = gamma_dist.pdf(x_shifted_t, k_gamma, loc=0, scale=scale_gamma) / (x_ns * np.log(10))
+    pdf_weibull_ns = weibull_min.pdf(x_shifted_t, k_weibull, loc=0, scale=scale_weibull) / (x_ns * np.log(10))
+
+    ax2.plot(x_ns, pdf_gamma_ns, "r-", lw=2, label="Gamma")
+    ax2.plot(x_ns, pdf_weibull_ns, "g-", lw=2, label="Weibull")
+    ax2.set_xlabel("γ (ns)")
+    ax2.set_ylabel("Density")
+    ax2.set_title("Inter-racer Delay Distribution")
+    ax2.legend()
+
+    fig.suptitle(f"{ticker} - Left Tail (Race Events)", fontsize=12)
+    plt.tight_layout()
+    return fig
+
+
+def save_figure(fig, path: Path, name: str) -> Path:
+    """Save figure to path and return the full path."""
+    full_path = path / f"{name}.png"
+    fig.savefig(full_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"    Saved {name}.png")
+    return full_path
+
+
+def concat_figures_to_pdf(figure_paths: list[Path], output_path: Path) -> None:
+    """Concatenate PNG figures into a single PDF."""
+    print(f"Concatenating {len(figure_paths)} figures into PDF...")
     with PdfPages(output_path) as pdf:
-        # Page 1: Spread distributions
-        fig = plot_spread_distribution(raw_df, ticker)
-        pdf.savefig(fig, bbox_inches="tight")
-        plt.close(fig)
-
-        # Page 2: Median event sizes table
-        fig = plot_median_sizes_table(median_sizes, ticker)
-        pdf.savefig(fig, bbox_inches="tight")
-        plt.close(fig)
-
-        # Page 3: Imbalance distribution
-        fig = plot_imbalance_distribution(df, ticker)
-        pdf.savefig(fig, bbox_inches="tight")
-        plt.close(fig)
-
-        # Page 4: Event probabilities
-        fig = plot_event_probabilities(event_probs, ticker)
-        pdf.savefig(fig, bbox_inches="tight")
-        plt.close(fig)
-
-        # Page 5: Intensities (split by spread)
-        fig = plot_intensities(intensities, dt_data, ticker)
-        pdf.savefig(fig, bbox_inches="tight")
-        plt.close(fig)
-
-        # Page 6: Size distributions
-        fig = plot_size_distributions(size_stat, ticker)
-        pdf.savefig(fig, bbox_inches="tight")
-        plt.close(fig)
-
-        # Page 7: Burst sizes
-        if len(burst_sizes) > 0:
-            fig = plot_burst_sizes(burst_sizes, ticker)
-            pdf.savefig(fig, bbox_inches="tight")
+        for path in figure_paths:
+            img = plt.imread(path)
+            fig, ax = plt.subplots(figsize=(img.shape[1] / 150, img.shape[0] / 150), dpi=150)
+            ax.imshow(img)
+            ax.axis("off")
+            pdf.savefig(fig, bbox_inches="tight", pad_inches=0)
             plt.close(fig)
-
-    print(f"  Saved estimation report to {output_path}")
+    print(f"  Saved {output_path}")
 
 
 def main():
@@ -854,12 +1207,18 @@ def main():
     output_dir = Path(args.output_dir) if args.output_dir else Path(f"data/{ticker}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Create figures directory
+    figures_dir = output_dir / "figures"
+    if not args.no_plots:
+        figures_dir.mkdir(exist_ok=True)
+    figure_paths = []
+
     print(f"Estimating QR model parameters for {ticker}")
     print(f"Output directory: {output_dir}")
 
     loader = DataLoader()
 
-    # Load raw data
+    # Load raw data for initial computations
     print("Loading raw data...")
     raw_df = load_raw_data(loader, ticker)
     min_date = raw_df["date"].min()
@@ -870,7 +1229,7 @@ def main():
     print(f"  Date range: {min_date} to {max_date} ({n_days} days)")
     print(f"  Average daily events: {avg_daily_events:,.0f}")
 
-    # Compute median event sizes
+    # Compute median event sizes (requires raw Q columns)
     print("Computing median event sizes...")
     median_sizes = compute_median_event_sizes(raw_df)
     for q in range(1, 5):
@@ -883,10 +1242,43 @@ def main():
     })
     median_df.write_csv(output_dir / "median_event_sizes.csv")
 
-    # Preprocess data
+    if not args.no_plots:
+        fig = plot_median_sizes_table(median_sizes, ticker)
+        figure_paths.append(save_figure(fig, figures_dir, "02_median_sizes"))
+
+    # Estimate invariant distributions (requires raw Q columns)
+    print("Estimating invariant queue distributions...")
+    q_max = 50
+    invariant_dist = estimate_invariant_distributions(raw_df, median_sizes, q_max=q_max)
+    invariant_dist.write_csv(output_dir / f"invariant_distributions_qmax{q_max}.csv")
+    print(f"  Saved {len(invariant_dist)} rows to invariant_distributions_qmax{q_max}.csv")
+
+    if not args.no_plots:
+        fig = plot_invariant_distributions(invariant_dist, ticker)
+        figure_paths.append(save_figure(fig, figures_dir, "08_invariant_distributions"))
+
+    # Pre-compute spread stats for plotting (before freeing raw_df)
+    print("Computing spread statistics...")
+    spread_all = raw_df.group_by("spread").len().sort("spread").filter(pl.col("spread").le(20))
+    spread_trades = raw_df.filter(pl.col("event").is_in(["Trd", "Trd_All"])).group_by("spread").len().sort("spread").filter(pl.col("spread").le(20))
+
+    if not args.no_plots:
+        fig = plot_spread_distribution_from_stats(spread_all, spread_trades, ticker)
+        figure_paths.append(save_figure(fig, figures_dir, "01_spread_distribution"))
+
+    # Preprocess data (still needs raw_df)
     print("Preprocessing data...")
     df = preprocess(raw_df, median_sizes)
     print(f"  Preprocessed {len(df):,} events")
+
+    # FREE raw_df to release memory
+    del raw_df
+    gc.collect()
+    print("  Freed raw data from memory")
+
+    if not args.no_plots:
+        fig = plot_imbalance_distribution(df, ticker)
+        figure_paths.append(save_figure(fig, figures_dir, "03_imbalance_distribution"))
 
     # Estimate event probabilities
     print("Estimating event probabilities...")
@@ -894,19 +1286,35 @@ def main():
     event_probs.write_csv(output_dir / "event_probabilities.csv")
     print(f"  Saved {len(event_probs)} rows to event_probabilities.csv")
 
+    if not args.no_plots:
+        fig = plot_event_probabilities(event_probs, ticker)
+        figure_paths.append(save_figure(fig, figures_dir, "04_event_probabilities"))
+
     # Estimate intensities
     print("Estimating intensities...")
     intensities, dt_data = estimate_intensities(df)
     intensities.write_csv(output_dir / "intensities.csv")
     print(f"  Saved {len(intensities)} rows to intensities.csv")
 
+    if not args.no_plots:
+        fig = plot_intensities(intensities, dt_data, ticker)
+        figure_paths.append(save_figure(fig, figures_dir, "05_intensities"))
+
     # Estimate size distributions (spread=1)
     print("Estimating size distributions (spread=1)...")
     size_dist, size_stat = estimate_size_distributions(df, median_sizes)
 
+    if not args.no_plots:
+        fig = plot_size_distributions(size_stat, ticker)
+        figure_paths.append(save_figure(fig, figures_dir, "06_size_distributions"))
+
     # Estimate burst sizes (spread>=2)
     print("Estimating burst size distributions (spread>=2)...")
-    burst_dist, burst_sizes = estimate_burst_sizes(raw_df, median_sizes)
+    burst_dist, burst_sizes = estimate_burst_sizes(df, median_sizes)
+
+    if not args.no_plots and len(burst_sizes) > 0:
+        fig = plot_burst_sizes(burst_sizes, ticker)
+        figure_paths.append(save_figure(fig, figures_dir, "07_burst_sizes"))
 
     # Combine size distributions
     combined = pl.concat([size_dist, burst_dist]).sort(
@@ -915,13 +1323,56 @@ def main():
     combined.write_csv(output_dir / "size_distrib.csv")
     print(f"  Saved {len(combined)} rows to size_distrib.csv")
 
-    # Generate PDF report
+    # Compute dt_data once for all delta_t estimations
+    print("Computing delta_t data...")
+    delta_t_data = compute_dt_data(df)
+    print(f"  Computed {len(delta_t_data):,} inter-arrival times")
+
+    # Step 1: Estimate peak region FIRST to get the floor threshold
+    print("Estimating delta_t peak distribution...")
+    delta_t_peak_params = estimate_delta_t_peak(delta_t_data)
+    delta_t_peak_params.write_csv(output_dir / "delta_distrib.csv")
+    peak_lower = delta_t_peak_params["lower"][0]
+    peak_upper = delta_t_peak_params["upper"][0]
+    print(f"  Peak region: [{peak_lower:.2f}, {peak_upper:.2f}]")
+
     if not args.no_plots:
+        fig = plot_delta_t_peak_fit(delta_t_data, delta_t_peak_params, ticker)
+        figure_paths.append(save_figure(fig, figures_dir, "09_delta_t_peak"))
+
+    # Step 2: GMM on all events (floor_threshold=0) - saved but NOT plotted
+    print("Estimating delta_t GMM (all events)...")
+    delta_t_mixtures = estimate_delta_t_mixtures(delta_t_data, floor_threshold=0.0)
+    delta_t_mixtures.write_csv(output_dir / "delta_t_mixtures.csv")
+    print(f"  Saved {len(delta_t_mixtures)} rows to delta_t_mixtures.csv")
+
+    # Step 3: GMM floored at peak_upper (excludes race events) - this one is PLOTTED
+    print(f"Estimating delta_t GMM (floored at {peak_upper:.2f})...")
+    delta_t_mixtures_floored = estimate_delta_t_mixtures(delta_t_data, floor_threshold=peak_upper)
+    delta_t_mixtures_floored.write_csv(output_dir / "delta_t_mixtures_floored.csv")
+    print(f"  Saved {len(delta_t_mixtures_floored)} rows to delta_t_mixtures_floored.csv")
+
+    if not args.no_plots and len(delta_t_mixtures_floored) > 0:
+        fig = plot_delta_t_gmm_grid(delta_t_data, delta_t_mixtures_floored, peak_upper, ticker)
+        figure_paths.append(save_figure(fig, figures_dir, "10_delta_t_gmm_grid"))
+
+    # Step 4: Left tail fits (gamma/weibull for race events)
+    print("Estimating delta_t left tail (gamma/weibull)...")
+    gamma_params, weibull_params = estimate_delta_t_left_tail(delta_t_data, max_log10=peak_lower)
+    gamma_params.write_csv(output_dir / "gamma_distrib.csv")
+    weibull_params.write_csv(output_dir / "weibull_distrib.csv")
+    print("  Saved gamma_distrib.csv and weibull_distrib.csv")
+
+    if not args.no_plots:
+        fig = plot_delta_t_left_tail(delta_t_data, gamma_params, weibull_params, ticker)
+        figure_paths.append(save_figure(fig, figures_dir, "11_delta_t_left_tail"))
+
+    # Concatenate all figures into PDF
+    if not args.no_plots:
+        # Sort by filename to get correct order
+        figure_paths.sort(key=lambda p: p.name)
         report_path = output_dir / "estimation_report.pdf"
-        generate_estimation_report(
-            df, raw_df, median_sizes, event_probs, intensities, dt_data,
-            size_stat, burst_sizes, ticker, report_path
-        )
+        concat_figures_to_pdf(figure_paths, report_path)
 
     print("Done!")
 

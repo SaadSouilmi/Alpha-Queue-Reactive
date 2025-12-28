@@ -3,6 +3,7 @@
 #include <string>
 #include <memory>
 #include <random>
+#include <filesystem>
 #include "orderbook.h"
 #include "qr_model.h"
 #include "simulation.h"
@@ -11,16 +12,32 @@
 using namespace qr;
 
 int main(int argc, char* argv[]) {
+    auto print_help = [&]() {
+        std::cout << "Usage: " << argv[0] << " <ticker> [options]\n";
+        std::cout << "Options:\n";
+        std::cout << "  --impact <name>  Impact model: ema_impact or no_impact (default: no_impact)\n";
+        std::cout << "  --k <scale>      Alpha scale factor (default: 1.0)\n";
+        std::cout << "  --seed <seed>    Random seed\n";
+        std::cout << "  --race           Enable race mechanism\n";
+        std::cout << "  --weibull        Use Weibull inter-racer delays (default)\n";
+        std::cout << "  --gamma          Use Gamma inter-racer delays\n";
+        std::cout << "  -h, --help       Show this help message\n";
+    };
+
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <ticker> [options]\n";
-        std::cerr << "Options: --impact [ema_impact|no_impact] --k <alpha_scale> --seed <seed> --race --weibull --gamma\n";
+        print_help();
         return 1;
+    }
+
+    if (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h") {
+        print_help();
+        return 0;
     }
 
     std::string base_path = "/home/labcmap/saad.souilmi/dev_cpp/qr/data";
     std::string ticker = argv[1];
     std::string data_path = base_path + "/" + ticker;
-    std::string results_path = base_path + "/results/";
+    std::string results_path = base_path + "/results/" + ticker + "/";
 
     // Parse flags: --impact [ema_impact|no_impact] --k [alpha_scale] --seed [seed] --race
     std::string impact_name = "no_impact";
@@ -66,7 +83,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Master seed: " << master_seed << "\n";
 
     // Load queue distributions
-    QueueDistributions dists(data_path + "/inv_distributions_qmax30.csv");
+    QueueDistributions dists(data_path + "/invariant_distributions_qmax50.csv");
 
     // Initialize order book
     OrderBook lob(dists, 4, lob_seed);
@@ -129,6 +146,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Alpha PnL compute: " << pnl_time.count() << " ms\n";
 
     // Save results
+    std::filesystem::create_directories(results_path);
     auto start_save = std::chrono::high_resolution_clock::now();
     result.save_parquet(output_path);
 

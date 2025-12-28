@@ -109,20 +109,31 @@ void run_and_accumulate(const std::string& data_path, const QueueDistributions& 
 }
 
 int main(int argc, char* argv[]) {
+    auto print_help = [&]() {
+        std::cout << "Usage: " << argv[0] << " <ticker>\n";
+        std::cout << "Options:\n";
+        std::cout << "  -h, --help    Show this help message\n";
+    };
+
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <ticker>\n";
+        print_help();
         return 1;
+    }
+
+    if (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h") {
+        print_help();
+        return 0;
     }
 
     std::string base_path = "/home/labcmap/saad.souilmi/dev_cpp/qr/data";
     std::string ticker = argv[1];
     std::string data_path = base_path + "/" + ticker;
-    std::string base_results_path = base_path + "/results";
+    std::string base_results_path = base_path + "/results/" + ticker;
 
     std::cout << "Using ticker: " << ticker << "\n";
 
     // Load queue distributions once
-    QueueDistributions dists(data_path + "/inv_distributions_qmax30.csv");
+    QueueDistributions dists(data_path + "/invariant_distributions_qmax50.csv");
     std::cout << "Loaded queue distributions\n";
 
     // PowerLawImpact parameters
