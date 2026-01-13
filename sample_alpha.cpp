@@ -22,6 +22,7 @@ int main(int argc, char* argv[]) {
         std::cout << "  --race           Enable race mechanism\n";
         std::cout << "  --weibull        Use Weibull inter-racer delays (default)\n";
         std::cout << "  --gamma          Use Gamma inter-racer delays\n";
+        std::cout << "  --use-total-lvl  Use 3D event probabilities (imb, spread, total_lvl)\n";
         std::cout << "  -h, --help       Show this help message\n";
     };
 
@@ -47,6 +48,7 @@ int main(int argc, char* argv[]) {
     uint64_t master_seed = std::random_device{}();
     bool use_race = false;
     bool use_weibull = true;
+    bool use_total_lvl = false;
 
     for (int i = 2; i < argc; ++i) {
         std::string arg = argv[i];
@@ -64,6 +66,8 @@ int main(int argc, char* argv[]) {
             use_weibull = true;
         } else if (arg == "--gamma") {
             use_weibull = false;
+        } else if (arg == "--use-total-lvl") {
+            use_total_lvl = true;
         }
     }
 
@@ -82,12 +86,14 @@ int main(int argc, char* argv[]) {
     theta_str = theta_str.substr(0, theta_str.find('.') + 3);  // trim to 2 decimals
     std::string race_str = use_race ? "_race" : "_norace";
     std::string theta_suffix = use_race ? "_theta" + theta_str : "";
-    std::string output_path = results_path + "result_alpha_" + impact_name + "_k" + k_str + race_str + theta_suffix + ".parquet";
+    std::string total_lvl_suffix = use_total_lvl ? "_totallvl" : "";
+    std::string output_path = results_path + "result_alpha_" + impact_name + "_k" + k_str + race_str + theta_suffix + total_lvl_suffix + ".parquet";
 
     std::cout << "Impact: " << impact_name << "\n";
     std::cout << "Alpha scale (k): " << alpha_scale << "\n";
     std::cout << "Theta: " << theta << "\n";
     std::cout << "Race: " << (use_race ? (use_weibull ? "weibull" : "gamma") : "off") << "\n";
+    std::cout << "Total lvl: " << (use_total_lvl ? "on" : "off") << "\n";
     std::cout << "Master seed: " << master_seed << "\n";
 
     // Load queue distributions
@@ -101,6 +107,10 @@ int main(int argc, char* argv[]) {
               {6, 17, 22, 23});
 
     QRParams params(data_path);
+    if (use_total_lvl) {
+        params.load_total_lvl_quantiles(data_path + "/total_lvl_quantiles.csv");
+        params.load_event_probabilities_3d(data_path + "/event_probabilities_3d.csv");
+    }
     SizeDistributions size_dists(data_path + "/size_distrib.csv");
     std::string delta_t_file = use_race ? "/delta_t_mixtures_floored.csv" : "/delta_t_mixtures.csv";
     MixtureDeltaT delta_t(data_path + delta_t_file);

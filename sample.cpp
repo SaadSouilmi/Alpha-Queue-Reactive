@@ -20,6 +20,7 @@ int main(int argc, char* argv[]) {
         std::cout << "  --race           Enable race mechanism\n";
         std::cout << "  --weibull        Use Weibull inter-racer delays (default)\n";
         std::cout << "  --gamma          Use Gamma inter-racer delays\n";
+        std::cout << "  --use-total-lvl  Use 3D event probabilities (imb, spread, total_lvl)\n";
         std::cout << "  -h, --help       Show this help message\n";
     };
 
@@ -37,13 +38,13 @@ int main(int argc, char* argv[]) {
     std::string ticker = argv[1];
     std::string data_path = base_path + "/" + ticker;
     std::string results_path = base_path + "/results/" + ticker + "/";
-    std::string output_path = results_path + "result.parquet";
 
     // Parse flags: --seed [seed], --mix, --race, --weibull, --gamma
     uint64_t master_seed = std::random_device{}();
     bool use_mixture = false;
     bool use_race = false;
     bool use_weibull = true;  // default to weibull
+    bool use_total_lvl = false;
 
     for (int i = 2; i < argc; ++i) {
         std::string arg = argv[i];
@@ -57,10 +58,16 @@ int main(int argc, char* argv[]) {
             use_weibull = true;
         } else if (arg == "--gamma") {
             use_weibull = false;
+        } else if (arg == "--use-total-lvl") {
+            use_total_lvl = true;
         }
     }
 
     std::cout << "Using ticker: " << ticker << "\n";
+
+    // Build output path with appropriate suffixes
+    std::string total_lvl_suffix = use_total_lvl ? "_totallvl" : "";
+    std::string output_path = results_path + "result" + total_lvl_suffix + ".parquet";
 
     // Generate seeds for each component
     std::mt19937_64 seed_rng(master_seed);
@@ -70,6 +77,7 @@ int main(int argc, char* argv[]) {
 
     std::cout << "Master seed: " << master_seed << "\n";
     std::cout << "Delta_t: " << (use_mixture ? "mixture" : "exponential") << "\n";
+    std::cout << "Total lvl: " << (use_total_lvl ? "on" : "off") << "\n";
     if (use_race) {
         std::cout << "Race: " << (use_weibull ? "weibull" : "gamma") << "\n";
     }
@@ -91,6 +99,10 @@ int main(int argc, char* argv[]) {
               {6, 17, 22, 23});
 
     QRParams params(data_path);
+    if (use_total_lvl) {
+        params.load_total_lvl_quantiles(data_path + "/total_lvl_quantiles.csv");
+        params.load_event_probabilities_3d(data_path + "/event_probabilities_3d.csv");
+    }
     SizeDistributions size_dists(data_path + "/size_distrib.csv");
 
     // Create model with or without delta_t

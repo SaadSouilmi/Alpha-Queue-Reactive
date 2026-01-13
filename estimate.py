@@ -37,50 +37,178 @@ def pl_select(condlist: list[pl.Expr], choicelist: list[pl.Expr]) -> pl.Expr:
     )
 
 
-def load_raw_data(loader: DataLoader, ticker: str) -> pl.DataFrame:
-    """Load raw order book data for a ticker."""
+def load_raw_data(loader: DataLoader, ticker: str, lazy: bool = False) -> pl.DataFrame | pl.LazyFrame:
+    """Load raw order book data for a ticker.
+
+    Args:
+        loader: DataLoader instance
+        ticker: Ticker symbol
+        lazy: If True, return LazyFrame for memory-efficient processing
+
+    Returns:
+        DataFrame or LazyFrame depending on lazy parameter
+    """
     info = loader.ticker_info(ticker)
     df = loader.load(
         ticker,
         start_date=info["date"].min(),
         end_date=info["date"].max(),
         schema="qr",
-        eager=True,
-    ).sort(["date", "ts_event"])
-    return df
+        eager=not lazy,
+    )
+    if lazy:
+        return df.sort(["date", "ts_event"])
+    return df.sort(["date", "ts_event"])
 
 
-def compute_median_event_sizes(df: pl.DataFrame) -> dict[int, float]:
+def compute_total_lvl_quantiles(
+    df: pl.DataFrame | pl.LazyFrame, median_sizes: dict[int, float], n_bins: int = 5,
+    sample_size: int = 1_000_000
+) -> tuple[np.ndarray, pl.DataFrame]:
+    """Compute quantile edges for total best-level volume (normalized).
+
+    Uses sampling for memory efficiency with large datasets.
+
+    Args:
+        df: Raw dataframe/lazyframe with Q_-1 and Q_1 columns
+        median_sizes: Median event sizes by queue level (for normalization)
+        n_bins: Number of quantile bins (default 5 = quintiles)
+        sample_size: Maximum samples to use for quantile estimation (default 1M)
+
+    Returns:
+        Tuple of (quantile_edges array, stats DataFrame for plotting)
+    """
+    q1_median = median_sizes[1]
+
+    # Use lazy evaluation for memory efficiency
+    if isinstance(df, pl.LazyFrame):
+        lazy_df = df
+    else:
+        lazy_df = df.lazy()
+
+    # Compute total_lvl lazily, then sample and collect
+    total_lvl_lazy = lazy_df.select(
+        ((pl.col("Q_-1") + pl.col("Q_1")) / q1_median).ceil().alias("total_lvl")
+    )
+
+    # Get row count for sampling decision
+    n_rows = total_lvl_lazy.select(pl.len()).collect().item()
+
+    if n_rows > sample_size:
+        # Sample for large datasets
+        rng = np.random.default_rng(42)
+        sample_frac = sample_size / n_rows
+        total_lvl = (
+            total_lvl_lazy
+            .filter(pl.lit(rng.random(n_rows)) < sample_frac)
+            .collect()["total_lvl"]
+            .to_numpy()
+        )
+    else:
+        total_lvl = total_lvl_lazy.collect()["total_lvl"].to_numpy()
+
+    # Compute quantile edges
+    percentiles = np.linspace(0, 100, n_bins + 1)
+    edges = np.percentile(total_lvl, percentiles)
+
+    # Create stats DataFrame for saving/plotting
+    stats = pl.DataFrame({
+        "bin": list(range(n_bins)),
+        "lower": edges[:-1],
+        "upper": edges[1:],
+        "percentile_lower": percentiles[:-1],
+        "percentile_upper": percentiles[1:],
+    })
+
+    return edges, stats
+
+
+def bin_total_lvl(total_lvl: pl.Expr, edges: np.ndarray) -> pl.Expr:
+    """Bin total_lvl values into quantile bins using edges.
+
+    Args:
+        total_lvl: Polars expression for total_lvl column
+        edges: Array of quantile edges (n_bins + 1 values)
+
+    Returns:
+        Polars expression for total_lvl_bin (0 to n_bins-1)
+    """
+    n_bins = len(edges) - 1
+    # Build cascading when/then for binning
+    condlist = [
+        total_lvl.le(edges[i + 1]) for i in range(n_bins - 1)
+    ]
+    choicelist = list(range(n_bins - 1))
+
+    # Last bin catches everything above
+    result = pl.lit(n_bins - 1)
+    for cond, choice in zip(reversed(condlist), reversed(choicelist)):
+        result = pl.when(cond).then(pl.lit(choice)).otherwise(result)
+
+    return result
+
+
+def compute_median_event_sizes(df: pl.DataFrame | pl.LazyFrame) -> dict[int, float]:
     """Compute median event sizes for Q_1 through Q_4 from raw data.
 
     For each queue level i, combines events from Q_i and Q_{-i} (symmetry)
     and computes the median event size.
 
+    Uses lazy evaluation for memory efficiency.
+
     Returns:
         Dictionary mapping queue level (1-4) to median event size.
     """
+    # Use lazy evaluation
+    if isinstance(df, pl.LazyFrame):
+        lazy_df = df
+    else:
+        lazy_df = df.lazy()
+
     # Compute event_q (queue position relative to best bid/ask)
-    df_with_q = df.with_columns(
+    lazy_df = lazy_df.with_columns(
         pl.when(pl.col("event_queue_nbr").lt(0))
         .then(pl.col("event_queue_nbr").sub(pl.col("best_bid_nbr")).sub(1))
         .otherwise(pl.col("event_queue_nbr").sub(pl.col("best_ask_nbr")).add(1))
         .alias("event_q")
     )
 
-    # Compute median for each |event_q| level (combining Q_i and Q_{-i})
+    # Compute median for all queue levels in one query
+    medians = (
+        lazy_df
+        .select("event_size", pl.col("event_q").abs().alias("abs_event_q"))
+        .filter(pl.col("abs_event_q").is_between(1, 4))
+        .group_by("abs_event_q")
+        .agg(pl.col("event_size").median().alias("median_size"))
+        .collect()
+    )
+
+    # Build result dictionary
     median_sizes = {}
+    for row in medians.iter_rows(named=True):
+        median_sizes[int(row["abs_event_q"])] = float(row["median_size"])
+
+    # Fill in missing levels with fallback
     for q in range(1, 5):
-        sizes = df_with_q.filter(pl.col("event_q").abs().eq(q))["event_size"]
-        if len(sizes) > 0:
-            median_sizes[q] = float(sizes.median())
-        else:
-            median_sizes[q] = 100.0  # fallback default
+        if q not in median_sizes:
+            median_sizes[q] = 100.0
 
     return median_sizes
 
 
-def preprocess(df: pl.DataFrame, median_sizes: dict[int, float]) -> pl.DataFrame:
-    """Preprocess raw order book data for estimation."""
+def preprocess(
+    df: pl.DataFrame,
+    median_sizes: dict[int, float],
+    total_lvl_edges: np.ndarray | None = None,
+) -> pl.DataFrame:
+    """Preprocess raw order book data for estimation.
+
+    Args:
+        df: Raw dataframe
+        median_sizes: Median event sizes by queue level
+        total_lvl_edges: Optional quantile edges for total_lvl binning.
+                         If provided, adds total_lvl and total_lvl_bin columns.
+    """
     # Filter valid events (removed spread <= 4 filter)
     df = df.filter(
         pl.col("event_side")
@@ -109,11 +237,11 @@ def preprocess(df: pl.DataFrame, median_sizes: dict[int, float]) -> pl.DataFrame
     q1_median = median_sizes[1]
     condlist = [pl.col("best_bid_nbr").eq(-i) for i in range(1, 11)]
     choicelist = [pl.col(f"Q_{-i}") for i in range(1, 11)]
-    best_bid = pl_select(condlist, choicelist).alias("best_bid").truediv(q1_median).ceil()
+    best_bid = pl_select(condlist, choicelist).truediv(q1_median).ceil()
 
     condlist = [pl.col("best_ask_nbr").eq(i) for i in range(1, 11)]
     choicelist = [pl.col(f"Q_{i}") for i in range(1, 11)]
-    best_ask = pl_select(condlist, choicelist).alias("best_ask").truediv(q1_median).ceil()
+    best_ask = pl_select(condlist, choicelist).truediv(q1_median).ceil()
     imb = ((best_bid - best_ask) / (best_bid + best_ask)).alias("imb")
 
     df = df.with_columns(imb)
@@ -133,6 +261,16 @@ def preprocess(df: pl.DataFrame, median_sizes: dict[int, float]) -> pl.DataFrame
     ]
     choicelist = [*(-bins[1:][::-1]), 0, *bins[1:]]
     df = df.with_columns(pl_select(condlist, choicelist).alias("imb_bin"))
+
+    # Add total_lvl and total_lvl_bin if edges provided
+    if total_lvl_edges is not None:
+        # total_lvl = best_bid + best_ask (already normalized)
+        # Recompute from expressions to avoid storing intermediate columns
+        total_lvl_expr = (best_bid + best_ask).alias("total_lvl")
+        df = df.with_columns(total_lvl_expr)
+        df = df.with_columns(
+            bin_total_lvl(pl.col("total_lvl"), total_lvl_edges).alias("total_lvl_bin")
+        )
 
     return df
 
@@ -248,10 +386,145 @@ def event_probas_spread2(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def event_probas_spread1_3d(df: pl.DataFrame) -> pl.DataFrame:
+    """Compute event probabilities for spread=1 with total_lvl_bin (3D state).
+
+    Requires df to have total_lvl_bin column (from preprocess with edges).
+    """
+    # Group by imb_bin, spread, total_lvl_bin, event, event_side, event_q
+    stat = df.group_by(["imb_bin", "spread", "total_lvl_bin", "event", "event_side", "event_q"]).agg(
+        pl.len()
+    )
+    stat = stat.filter(pl.col("spread").eq(1) & pl.col("event_q").is_between(-2, 2))
+
+    # Symmetrize: pool (imb=+x, side=A) with (imb=-x, side=B)
+    # total_lvl_bin stays the same (symmetric by construction)
+    stat1 = (
+        stat.with_columns(
+            pl.col("imb_bin")
+            .sign()
+            .mul(pl.col("event_side").replace({"A": 1, "B": -1}).cast(int))
+            .alias("sign"),
+            pl.col("imb_bin").abs(),
+            pl.col("event_q").abs(),
+        )
+        .group_by(["imb_bin", "spread", "total_lvl_bin", "event", "event_q", "sign"])
+        .agg(pl.col("len").sum())
+        .with_columns(
+            pl.col("sign")
+            .cast(str)
+            .replace({"1.0": "A", "0.0": "A", "-0.0": "A", "-1.0": "B"})
+            .alias("event_side")
+        )
+    )
+
+    # Mirror to negative imbalances (total_lvl_bin unchanged)
+    stat2 = stat1.with_columns(
+        -pl.col("imb_bin"), pl.col("event_side").replace({"A": "B", "B": "A"})
+    )
+
+    stat = pl.concat((stat1, stat2))
+
+    # Compute probability within each (imb_bin, total_lvl_bin)
+    stat = stat.with_columns(
+        proba=pl.col("len").truediv(pl.col("len").sum().over(["imb_bin", "total_lvl_bin"]))
+    )
+
+    stat = stat.with_columns(
+        pl.col("event_q").mul(pl.col("event_side").replace({"A": 1, "B": -1}).cast(int))
+    )
+    stat = stat.sort(["imb_bin", "total_lvl_bin", "spread", "event"])
+
+    return stat.drop("sign").select(
+        "imb_bin", "spread", "total_lvl_bin", "event", "event_q", "len", "event_side", "proba"
+    )
+
+
+def event_probas_spread2_3d(df: pl.DataFrame) -> pl.DataFrame:
+    """Compute event probabilities for spread>=2 with total_lvl_bin (3D state).
+
+    Create events only. Requires df to have total_lvl_bin column.
+    """
+    stat = (
+        df.filter(
+            pl.col("event").is_in(["Create_Bid", "Create_Ask"]) & pl.col("spread").ge(2)
+        )
+        .with_columns(spread=2)
+        .group_by(["imb_bin", "spread", "total_lvl_bin", "event", "event_side"])
+        .len()
+    )
+    stat = stat.filter(
+        pl.col("event")
+        .replace({"Create_Ask": 1, "Create_Bid": -1})
+        .cast(int)
+        .mul(pl.col("event_side").replace({"A": 1, "B": -1}).cast(int))
+        .gt(0)
+    )
+
+    # Symmetrize
+    stat1 = (
+        stat.with_columns(
+            pl.col("event_side")
+            .replace({"A": 1, "B": -1})
+            .cast(int)
+            .mul(pl.col("imb_bin").sign())
+            .alias("sign"),
+            pl.col("imb_bin").abs(),
+        )
+        .group_by(["imb_bin", "spread", "total_lvl_bin", "sign"])
+        .agg(pl.col("len").sum())
+        .with_columns(
+            pl.col("sign")
+            .cast(str)
+            .replace(
+                {
+                    "1.0": "Create_Ask",
+                    "-0.0": "Create_Ask",
+                    "0.0": "Create_Ask",
+                    "-1.0": "Create_Bid",
+                }
+            )
+            .alias("event")
+        )
+    )
+
+    # Mirror to negative imbalances
+    stat2 = stat1.with_columns(
+        -pl.col("imb_bin"),
+        pl.col("event").replace(
+            {"Create_Ask": "Create_Bid", "Create_Bid": "Create_Ask"}
+        ),
+    )
+
+    stat = pl.concat([stat1, stat2])
+    stat = stat.with_columns(
+        pl.col("len").truediv(pl.col("len").sum().over(["imb_bin", "total_lvl_bin"])).alias("proba")
+    ).sort(["imb_bin", "total_lvl_bin"])
+
+    return (
+        stat.with_columns(
+            event_q=pl.lit(0).cast(pl.Int64),
+            event_side=pl.col("event").replace({"Create_Bid": "B", "Create_Ask": "A"}),
+        )
+        .drop("sign")
+        .select("imb_bin", "spread", "total_lvl_bin", "event", "event_q", "len", "event_side", "proba")
+    )
+
+
 def estimate_event_probabilities(df: pl.DataFrame) -> pl.DataFrame:
-    """Estimate event probabilities by state."""
+    """Estimate event probabilities by state (2D: imb_bin, spread)."""
     return pl.concat([event_probas_spread1(df), event_probas_spread2(df)]).sort(
         "imb_bin", "event", "event_side"
+    )
+
+
+def estimate_event_probabilities_3d(df: pl.DataFrame) -> pl.DataFrame:
+    """Estimate event probabilities by state (3D: imb_bin, spread, total_lvl_bin).
+
+    Requires df to have total_lvl_bin column (from preprocess with edges).
+    """
+    return pl.concat([event_probas_spread1_3d(df), event_probas_spread2_3d(df)]).sort(
+        "imb_bin", "total_lvl_bin", "event", "event_side"
     )
 
 
@@ -472,43 +745,51 @@ def estimate_burst_sizes(df: pl.DataFrame, median_sizes: dict[int, float]) -> tu
 
 
 def estimate_invariant_distributions(
-    raw_df: pl.DataFrame, median_sizes: dict[int, float], q_max: int = 50
+    raw_df: pl.DataFrame | pl.LazyFrame, median_sizes: dict[int, float], q_max: int = 50
 ) -> pl.DataFrame:
     """Estimate invariant queue size distributions for Q_1 to Q_4.
 
     For each queue level i, combines Q_i and Q_{-i}, normalizes by median
     event size, and computes the empirical distribution truncated at q_max.
 
+    Uses lazy evaluation for memory efficiency.
+
     Args:
-        raw_df: Raw dataframe with Q_-10 to Q_10 columns
+        raw_df: Raw dataframe/lazyframe with Q_-10 to Q_10 columns
         median_sizes: Median event sizes by queue level
         q_max: Maximum queue size to include (truncate above this)
 
     Returns:
         DataFrame with columns: queue_level, q, probability
     """
+    # Use lazy evaluation
+    if isinstance(raw_df, pl.LazyFrame):
+        lazy_df = raw_df
+    else:
+        lazy_df = raw_df.lazy()
+
     results = []
 
     for i in range(1, 5):
         median_i = median_sizes[i]
 
-        # Get Q_i and Q_{-i}, normalize by median, ceil to integers
-        q_pos = (raw_df[f"Q_{i}"] / median_i).ceil().cast(int)
-        q_neg = (raw_df[f"Q_{-i}"] / median_i).ceil().cast(int)
-
-        # Combine Q_i and Q_{-i}
-        all_q = pl.concat([q_pos, q_neg]).alias("q")
-
-        # Truncate at q_max and compute empirical distribution
+        # Compute both Q_i and Q_{-i} in a single lazy query
         counts = (
-            all_q.to_frame()
+            lazy_df
+            .select(
+                (pl.col(f"Q_{i}") / median_i).ceil().cast(int).alias("q_pos"),
+                (pl.col(f"Q_{-i}") / median_i).ceil().cast(int).alias("q_neg"),
+            )
+            .unpivot(on=["q_pos", "q_neg"], value_name="q")
+            .select("q")
             .filter(pl.col("q").le(q_max))
             .group_by("q")
             .len()
+            .collect()
             .sort("q")
         )
-        total = counts["len"].sum()
 
+        total = counts["len"].sum()
         for row in counts.iter_rows():
             q_val, count = row
             results.append({
@@ -794,6 +1075,104 @@ def plot_median_sizes_table(median_sizes: dict[int, float], ticker: str) -> plt.
         table[(0, j)].set_text_props(color="white", weight="bold")
 
     ax.set_title(f"{ticker} - Median Event Sizes by Queue Level", fontsize=12, pad=20)
+    plt.tight_layout()
+    return fig
+
+
+def plot_total_lvl_quantiles(
+    raw_df: pl.DataFrame | pl.LazyFrame,
+    quantile_stats: pl.DataFrame,
+    median_sizes: dict[int, float],
+    ticker: str,
+    sample_size: int = 500_000,
+) -> plt.Figure:
+    """Plot total_lvl distribution with quantile edges marked.
+
+    Uses sampling for memory efficiency with large datasets.
+
+    Args:
+        raw_df: Raw dataframe/lazyframe with Q_-1 and Q_1 columns
+        quantile_stats: DataFrame with bin, lower, upper columns
+        median_sizes: Median event sizes by queue level (for normalization)
+        ticker: Ticker symbol for title
+        sample_size: Maximum samples to use for histogram (default 500K)
+    """
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    q1_median = median_sizes[1]
+
+    # Use lazy evaluation and sampling for memory efficiency
+    if isinstance(raw_df, pl.LazyFrame):
+        lazy_df = raw_df
+    else:
+        lazy_df = raw_df.lazy()
+
+    # Sample data if needed
+    n_rows = lazy_df.select(pl.len()).collect().item()
+    if n_rows > sample_size:
+        sample_frac = sample_size / n_rows
+        total_lvl = (
+            lazy_df
+            .select(((pl.col("Q_-1") + pl.col("Q_1")) / q1_median).ceil().alias("total_lvl"))
+            .filter(pl.lit(np.random.default_rng(42).random(n_rows)) < sample_frac)
+            .collect()["total_lvl"]
+            .to_numpy()
+        )
+    else:
+        total_lvl = (
+            lazy_df
+            .select(((pl.col("Q_-1") + pl.col("Q_1")) / q1_median).ceil().alias("total_lvl"))
+            .collect()["total_lvl"]
+            .to_numpy()
+        )
+
+    # Left: Histogram with quantile edges
+    ax1.hist(total_lvl, bins=100, density=True, alpha=0.7, color="steelblue", edgecolor="black", linewidth=0.3)
+
+    # Mark quantile edges
+    edges = [quantile_stats["lower"][0]] + quantile_stats["upper"].to_list()
+    colors = plt.cm.tab10(np.linspace(0, 1, len(edges) - 1))
+    for i, (left, right) in enumerate(zip(edges[:-1], edges[1:])):
+        ax1.axvline(left, color=colors[i], linestyle="--", lw=1.5, alpha=0.8)
+        ax1.axvspan(left, right, alpha=0.15, color=colors[i], label=f"Bin {i}: [{left:.1f}, {right:.1f})")
+    ax1.axvline(edges[-1], color=colors[-1], linestyle="--", lw=1.5, alpha=0.8)
+
+    ax1.set_xlabel("Total Level (Q_bid + Q_ask, normalized)")
+    ax1.set_ylabel("Density")
+    ax1.set_title("Total Level Distribution with Quantile Bins")
+    ax1.legend(fontsize=8, loc="upper right")
+    ax1.set_xlim(0, np.percentile(total_lvl, 99))
+
+    # Right: Table showing quantile statistics
+    ax2.axis("off")
+    table_data = [["Bin", "Lower", "Upper", "Percentile Range"]]
+    for row in quantile_stats.iter_rows(named=True):
+        table_data.append([
+            f"{row['bin']}",
+            f"{row['lower']:.1f}",
+            f"{row['upper']:.1f}",
+            f"{row['percentile_lower']:.0f}% - {row['percentile_upper']:.0f}%",
+        ])
+
+    table = ax2.table(
+        cellText=table_data[1:],
+        colLabels=table_data[0],
+        loc="center",
+        cellLoc="center",
+        colWidths=[0.15, 0.25, 0.25, 0.35],
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1.2, 1.8)
+
+    # Style header row
+    for j in range(4):
+        table[(0, j)].set_facecolor("#4472C4")
+        table[(0, j)].set_text_props(color="white", weight="bold")
+
+    ax2.set_title("Quantile Bin Edges", fontsize=12, pad=20)
+
+    fig.suptitle(f"{ticker} - Total Level (Q_bid + Q_ask) Quantiles", fontsize=12, y=1.02)
     plt.tight_layout()
     return fig
 
@@ -1201,6 +1580,11 @@ def main():
         action="store_true",
         help="Skip generating the PDF report"
     )
+    parser.add_argument(
+        "--low-memory",
+        action="store_true",
+        help="Use more aggressive memory management (slower but uses less RAM)"
+    )
     args = parser.parse_args()
 
     ticker = args.ticker
@@ -1246,6 +1630,17 @@ def main():
         fig = plot_median_sizes_table(median_sizes, ticker)
         figure_paths.append(save_figure(fig, figures_dir, "02_median_sizes"))
 
+    # Compute total_lvl quantiles (requires raw Q columns)
+    print("Computing total_lvl quantiles...")
+    total_lvl_edges, total_lvl_stats = compute_total_lvl_quantiles(raw_df, median_sizes, n_bins=5)
+    total_lvl_stats.write_csv(output_dir / "total_lvl_quantiles.csv")
+    print(f"  Saved 5 quantile bins to total_lvl_quantiles.csv")
+    print(f"  Edges: {total_lvl_edges}")
+
+    if not args.no_plots:
+        fig = plot_total_lvl_quantiles(raw_df, total_lvl_stats, median_sizes, ticker)
+        figure_paths.append(save_figure(fig, figures_dir, "02b_total_lvl_quantiles"))
+
     # Estimate invariant distributions (requires raw Q columns)
     print("Estimating invariant queue distributions...")
     q_max = 50
@@ -1267,12 +1662,14 @@ def main():
         figure_paths.append(save_figure(fig, figures_dir, "01_spread_distribution"))
 
     # Preprocess data (still needs raw_df)
+    # Pass total_lvl_edges to add total_lvl and total_lvl_bin columns
     print("Preprocessing data...")
-    df = preprocess(raw_df, median_sizes)
+    df = preprocess(raw_df, median_sizes, total_lvl_edges=total_lvl_edges)
     print(f"  Preprocessed {len(df):,} events")
 
     # FREE raw_df to release memory
     del raw_df
+    del spread_all, spread_trades
     gc.collect()
     print("  Freed raw data from memory")
 
@@ -1280,8 +1677,8 @@ def main():
         fig = plot_imbalance_distribution(df, ticker)
         figure_paths.append(save_figure(fig, figures_dir, "03_imbalance_distribution"))
 
-    # Estimate event probabilities
-    print("Estimating event probabilities...")
+    # Estimate event probabilities (2D: imb_bin, spread)
+    print("Estimating event probabilities (2D)...")
     event_probs = estimate_event_probabilities(df)
     event_probs.write_csv(output_dir / "event_probabilities.csv")
     print(f"  Saved {len(event_probs)} rows to event_probabilities.csv")
@@ -1289,6 +1686,15 @@ def main():
     if not args.no_plots:
         fig = plot_event_probabilities(event_probs, ticker)
         figure_paths.append(save_figure(fig, figures_dir, "04_event_probabilities"))
+
+    # Estimate event probabilities (3D: imb_bin, spread, total_lvl_bin)
+    print("Estimating event probabilities (3D with total_lvl)...")
+    event_probs_3d = estimate_event_probabilities_3d(df)
+    event_probs_3d.write_csv(output_dir / "event_probabilities_3d.csv")
+    print(f"  Saved {len(event_probs_3d)} rows to event_probabilities_3d.csv")
+    del event_probs_3d
+    if args.low_memory:
+        gc.collect()
 
     # Estimate intensities
     print("Estimating intensities...")
@@ -1322,11 +1728,19 @@ def main():
     )
     combined.write_csv(output_dir / "size_distrib.csv")
     print(f"  Saved {len(combined)} rows to size_distrib.csv")
+    del size_dist, burst_dist, combined, size_stat, burst_sizes
+    if args.low_memory:
+        gc.collect()
 
     # Compute dt_data once for all delta_t estimations
     print("Computing delta_t data...")
     delta_t_data = compute_dt_data(df)
     print(f"  Computed {len(delta_t_data):,} inter-arrival times")
+
+    # Free preprocessed dataframe - no longer needed
+    del df
+    gc.collect()
+    print("  Freed preprocessed data from memory")
 
     # Step 1: Estimate peak region FIRST to get the floor threshold
     print("Estimating delta_t peak distribution...")

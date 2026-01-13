@@ -239,7 +239,8 @@ void run_and_accumulate(const std::string& data_path, const QueueDistributions& 
                         const DeltaT* delta_t, const TradeIndices& trd_idx,
                         const std::vector<LOBConfig>& lob_configs,
                         double ema_alpha, double ema_m,
-                        uint64_t seed, int64_t duration, int32_t metaorder_vol, Accumulator& acc) {
+                        uint64_t seed, int64_t duration, int32_t metaorder_vol,
+                        bool use_total_lvl, Accumulator& acc) {
     // Pick random LOB config based on seed
     std::mt19937_64 rng(seed);
     size_t config_idx = rng() % lob_configs.size();
@@ -252,6 +253,10 @@ void run_and_accumulate(const std::string& data_path, const QueueDistributions& 
              std::vector<int32_t>(cfg.ask_vols.begin(), cfg.ask_vols.end()));
 
     QRParams params(data_path);
+    if (use_total_lvl) {
+        params.load_total_lvl_quantiles(data_path + "/total_lvl_quantiles.csv");
+        params.load_event_probabilities_3d(data_path + "/event_probabilities_3d.csv");
+    }
     SizeDistributions size_dists(data_path + "/size_distrib.csv");
 
     // Create model with or without delta_t
@@ -340,6 +345,7 @@ int main(int argc, char* argv[]) {
         std::cout << "  --alpha <val>      EMA impact alpha (default: 0.005)\n";
         std::cout << "  --m <val>          EMA impact multiplier (default: 4.5)\n";
         std::cout << "  --duration <min>   Simulation duration in minutes (default: 30)\n";
+        std::cout << "  --use-total-lvl    Use 3D event probabilities (imb, spread, total_lvl)\n";
         std::cout << "  -h, --help         Show this help message\n";
     };
 
@@ -358,11 +364,12 @@ int main(int argc, char* argv[]) {
     std::string data_path = base_path + "/" + ticker;
     std::string base_results_path = base_path + "/results/" + ticker;
 
-    // Parse flags: --mix, --alpha, --m, --duration
+    // Parse flags: --mix, --alpha, --m, --duration, --use-total-lvl
     bool use_mixture = false;
     double ema_alpha = 0.005;
     double ema_m = 4.5;
     int duration_min = 30;
+    bool use_total_lvl = false;
     for (int i = 2; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--mix") {
@@ -373,6 +380,8 @@ int main(int argc, char* argv[]) {
             ema_m = std::stod(argv[++i]);
         } else if (arg == "--duration" && i + 1 < argc) {
             duration_min = std::stoi(argv[++i]);
+        } else if (arg == "--use-total-lvl") {
+            use_total_lvl = true;
         }
     }
 
@@ -411,6 +420,7 @@ int main(int argc, char* argv[]) {
 
     std::cout << "Using " << num_threads << " threads\n";
     std::cout << "EMA impact: alpha=" << ema_alpha << ", m=" << ema_m << "\n";
+    std::cout << "Total lvl: " << (use_total_lvl ? "on" : "off") << "\n";
     std::cout << "Grid: " << (duration / step + 1) << " points (500ms spacing)\n";
     std::cout << "Duration: " << duration_min << " minutes, Metaorder execution: 5 minutes\n";
 
@@ -449,7 +459,7 @@ int main(int argc, char* argv[]) {
             for (int i = batch_start; i < batch_end; i++) {
                 futures.push_back(std::async(std::launch::async, run_and_accumulate,
                                               data_path, std::cref(dists), delta_t, std::cref(trd_idx), std::cref(lob_configs),
-                                              ema_alpha, ema_m, i, duration, metaorder_vol, std::ref(acc)));
+                                              ema_alpha, ema_m, i, duration, metaorder_vol, use_total_lvl, std::ref(acc)));
             }
 
             for (auto& f : futures) {
@@ -462,9 +472,10 @@ int main(int argc, char* argv[]) {
         }
 
         std::string dt_suffix = use_mixture ? "_mix" : "_exp";
+        std::string total_lvl_suffix = use_total_lvl ? "_totallvl" : "";
         std::ostringstream oss;
         oss << base_results_path << "/ema_impact_pct_" << static_cast<int>(pct * 10)
-            << "_a" << ema_alpha << "_m" << ema_m << dt_suffix << ".csv";
+            << "_a" << ema_alpha << "_m" << ema_m << dt_suffix << total_lvl_suffix << ".csv";
         std::string out_path = oss.str();
         acc.save_csv(out_path);
 

@@ -99,12 +99,34 @@ namespace qr {
         // 21 imbalance bins: -1.0, -0.9, ..., 0.0, ..., 0.9, 1.0
         // 2 spread states: spread=1 (index 0), spread>=2 (index 1)
         static constexpr int NUM_IMB_BINS = 21;
+        static constexpr int NUM_TOTAL_LVL_BINS = 5;
+
+        // 2D state params: [imb_bin][spread] - used for time sampling and default event sampling
         std::array<std::array<StateParams, 2>, NUM_IMB_BINS> state_params;
+
+        // 3D state params: [imb_bin][spread][total_lvl] - used for event sampling when use_total_lvl=true
+        std::array<std::array<std::array<StateParams, NUM_TOTAL_LVL_BINS>, 2>, NUM_IMB_BINS> event_state_params_3d;
+
+        // Quantile edges for total_lvl binning (6 values for 5 bins)
+        std::array<double, NUM_TOTAL_LVL_BINS + 1> total_lvl_edges{};
+
+        // Flag to enable 3D event sampling
+        bool use_total_lvl = false;
 
         QRParams(const std::string& data_path);
 
+        // Load 3D event probabilities from CSV
+        void load_event_probabilities_3d(const std::string& csv_path);
+
+        // Load total_lvl quantile edges from CSV
+        void load_total_lvl_quantiles(const std::string& csv_path);
+
         StateParams& get(uint8_t imbalance_bin, int32_t spread) {
             return state_params[imbalance_bin][spread];
+        }
+
+        StateParams& get_3d(uint8_t imbalance_bin, int32_t spread, uint8_t total_lvl_bin) {
+            return event_state_params_3d[imbalance_bin][spread][total_lvl_bin];
         }
     };
 
@@ -410,12 +432,22 @@ namespace qr {
             lob_(lob), params_(params), size_dists_(&size_dists), delta_t_(&delta_t), rng_(seed) {}
 
         Order sample_order(int64_t current_time) {
-            StateParams& state_params = get_state_params();
+            uint8_t imb_bin = get_imbalance_bin(lob_->imbalance());
+            int32_t spread = std::min(lob_->spread() - 1, 1);
+
+            // Get state params - either 2D or 3D depending on use_total_lvl flag
+            StateParams* state_params_ptr;
+            if (params_.use_total_lvl) {
+                uint8_t total_lvl_bin = get_total_lvl_bin();
+                state_params_ptr = &params_.get_3d(imb_bin, spread, total_lvl_bin);
+            } else {
+                state_params_ptr = &params_.get(imb_bin, spread);
+            }
+            StateParams& state_params = *state_params_ptr;
             const Event& event = state_params.sample_event(rng_);
 
             int32_t size = 1;
             if (size_dists_) {
-                uint8_t imb_bin = get_imbalance_bin(lob_->imbalance());
                 if (lob_->spread() == 1) {
                     // Spread=1: Add, Can, Trd at queue 1 or 2
                     int queue = std::abs(event.queue_nbr);
@@ -478,6 +510,21 @@ namespace qr {
                 int bin = static_cast<int>(std::ceil(imbalance * 10.0)) + 10;
                 return static_cast<uint8_t>(std::clamp(bin, 11, 20));
             }
+        }
+
+        // Get total_lvl bin based on current order book state
+        // total_lvl = Q_bid + Q_ask (at best levels)
+        uint8_t get_total_lvl_bin() {
+            double total_lvl = static_cast<double>(lob_->Q(-1) + lob_->Q(1));
+            const auto& edges = params_.total_lvl_edges;
+
+            // Find bin: edges[i] <= total_lvl < edges[i+1]
+            for (uint8_t i = 0; i < QRParams::NUM_TOTAL_LVL_BINS - 1; ++i) {
+                if (total_lvl <= edges[i + 1]) {
+                    return i;
+                }
+            }
+            return QRParams::NUM_TOTAL_LVL_BINS - 1;  // Last bin
         }
         StateParams& get_state_params() {
             uint8_t imbalance_bin = get_imbalance_bin(lob_->imbalance());
