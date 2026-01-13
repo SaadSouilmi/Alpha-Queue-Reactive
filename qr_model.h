@@ -352,6 +352,7 @@ namespace qr {
         virtual void step(int64_t dt_ns) = 0;
         virtual double value() const = 0;
         virtual void reset() = 0;
+        virtual void consume(double fraction) = 0;  // Reduce alpha by fraction (info acted upon)
     };
 
     class NoAlpha : public Alpha {
@@ -359,6 +360,7 @@ namespace qr {
         void step(int64_t) override {}
         double value() const override { return 0.0; }
         void reset() override {}
+        void consume(double) override {}  // No-op for NoAlpha
     };
 
     class OUAlpha : public Alpha {
@@ -380,6 +382,10 @@ namespace qr {
 
         double value() const override { return alpha_; }
         void reset() override { alpha_ = 0.0; }
+        void consume(double fraction) override {
+            // Reduce alpha toward 0 by fraction (info acted upon)
+            alpha_ *= (1.0 - fraction);
+        }
 
     private:
         double kappa_;    // in ns^-1

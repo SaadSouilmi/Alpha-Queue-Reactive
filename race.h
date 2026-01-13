@@ -47,11 +47,14 @@ struct RaceParams {
     double threshold = 0.7;       // logistic inflection point
     double steepness = 8.0;       // logistic steepness
 
-    // Order type probabilities (must sum to <= 1, remainder is cancels)
+    // Base order type probabilities (at threshold |α|)
     // Races only trigger at spread = 1
-    double trade_prob = 0.45;       // 45% trades (if late, naturally rest as limits)
-    double limit_next_prob = 0.30;  // 30% MM repositioning at Q_2
-    // cancel_prob = 0.25           // 25% cancels (implicit)
+    double base_trade_prob = 0.45;   // 45% trades (if late, naturally rest as limits)
+    double base_limit_prob = 0.30;   // 30% limit orders (same side as alpha)
+    double base_cancel_prob = 0.25;  // 25% cancels
+
+    // Limit probability decay: limit_prob decreases as |α| increases above threshold
+    double limit_decay_rate = 0.5;   // How fast limit_prob decays with excess alpha
 
     double base_mean_racers = 4.0;  // base geometric mean for number of racers
     double racer_scale = 2.5;       // scale factor: mean = base + scale * (|α| - threshold)
@@ -62,6 +65,22 @@ struct RaceParams {
         double abs_alpha = std::abs(alpha);
         if (abs_alpha < min_threshold) return 0.0;
         return 1.0 / (1.0 + std::exp(-steepness * (abs_alpha - threshold)));
+    }
+
+    // Compute dynamic probabilities given alpha
+    // Limit prob decays as |α| increases; freed probability goes to trades/cancels
+    void compute_probs(double alpha, double& trade_prob, double& limit_prob, double& cancel_prob) const {
+        double abs_alpha = std::abs(alpha);
+        double excess = std::max(0.0, abs_alpha - threshold);
+
+        // Limit prob decays exponentially with excess alpha
+        double decay = std::exp(-limit_decay_rate * excess);
+        limit_prob = base_limit_prob * decay;
+
+        // Redistribute freed probability: 60% to trades, 40% to cancels
+        double freed = base_limit_prob - limit_prob;
+        trade_prob = base_trade_prob + freed * 0.6;
+        cancel_prob = base_cancel_prob + freed * 0.4;
     }
 
     // Sample number of racers from geometric distribution (mean scales with |α|)

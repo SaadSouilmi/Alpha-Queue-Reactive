@@ -171,9 +171,14 @@ std::vector<Order> LogisticRace::generate_racers(double alpha, int64_t base_time
 
     std::uniform_real_distribution<double> uniform(0.0, 1.0);
 
+    // Compute dynamic probabilities based on alpha
+    // Limit prob decays as |α| increases (strong alpha → less passive positioning)
+    double trade_prob, limit_prob, cancel_prob;
+    params_.compute_probs(alpha, trade_prob, limit_prob, cancel_prob);
+
     // Cumulative thresholds for order type sampling
-    double thresh_trade = params_.trade_prob;
-    double thresh_limit_next = thresh_trade + params_.limit_next_prob;
+    double thresh_trade = trade_prob;
+    double thresh_limit = thresh_trade + limit_prob;
 
     for (int i = 0; i < num_racers; ++i) {
         double r = uniform(rng);
@@ -189,13 +194,13 @@ std::vector<Order> LogisticRace::generate_racers(double alpha, int64_t base_time
             side = (alpha > 0) ? Side::Bid : Side::Ask;
             price = (side == Side::Bid) ? best_ask : best_bid;
 
-        } else if (r < thresh_limit_next) {
-            // LIMIT AT Q_2: MM positioning at next level (opposite side)
-            // α > 0 → add ask at P_2 (queue priority for new best ask)
-            // α < 0 → add bid at P_-2 (queue priority for new best bid)
+        } else if (r < thresh_limit) {
+            // LIMIT: passive positioning on SAME side as alpha direction
+            // α > 0 → add bid at best_bid (queue to buy before price rises)
+            // α < 0 → add ask at best_ask (queue to sell before price drops)
             type = OrderType::Add;
-            side = (alpha > 0) ? Side::Ask : Side::Bid;
-            price = (side == Side::Ask) ? (best_ask + 1) : (best_bid - 1);
+            side = (alpha > 0) ? Side::Bid : Side::Ask;
+            price = (side == Side::Bid) ? best_bid : best_ask;
 
         } else {
             // CANCEL: pull quotes to avoid adverse selection

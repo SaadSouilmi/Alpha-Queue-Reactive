@@ -254,9 +254,9 @@ Buffer run_metaorder(OrderBook& lob, QRModel& model, MarketImpact& impact, MetaO
 
 void AlphaPnL::save_csv(const std::string& path) const {
     std::ofstream file(path);
-    file << "lag_sec,alpha_tickreturn_cov\n";
+    file << "lag_sec,alpha_tickreturn_cov,alpha_tickreturn_cov_ci\n";
     for (size_t i = 0; i < lag_sec.size(); i++) {
-        file << lag_sec[i] << "," << alpha_tickreturn_cov[i] << "\n";
+        file << lag_sec[i] << "," << alpha_tickreturn_cov[i] << "," << alpha_tickreturn_cov_ci[i] << "\n";
     }
 }
 
@@ -278,7 +278,9 @@ AlphaPnL compute_alpha_pnl(const Buffer& buffer, const std::vector<int64_t>& lag
 
     // Compute for each lag
     for (int64_t lag : lags_ns) {
-        double sum_tick = 0.0;
+        // Welford's online algorithm for mean and variance
+        double mean = 0.0;
+        double M2 = 0.0;
         size_t count = 0;
         size_t j = 0;
 
@@ -289,13 +291,26 @@ AlphaPnL compute_alpha_pnl(const Buffer& buffer, const std::vector<int64_t>& lag
             while (j < n && records[j].rejected) j++;
             if (j < n && mid[i] > 0.0 && mid[j] > 0.0) {
                 double tick_ret = mid[j] - mid[i];
-                sum_tick += alpha[i] * tick_ret;
+                double sample = alpha[i] * tick_ret;
                 count++;
+                double delta = sample - mean;
+                mean += delta / static_cast<double>(count);
+                double delta2 = sample - mean;
+                M2 += delta * delta2;
             }
         }
 
         result.lag_sec.push_back(static_cast<double>(lag) / 1e9);
-        result.alpha_tickreturn_cov.push_back(count > 0 ? sum_tick / static_cast<double>(count) : 0.0);
+        result.alpha_tickreturn_cov.push_back(mean);
+
+        // Compute 95% CI half-width: 1.96 * SE = 1.96 * sqrt(var / n)
+        double ci = 0.0;
+        if (count > 1) {
+            double variance = M2 / static_cast<double>(count - 1);
+            double std_err = std::sqrt(variance / static_cast<double>(count));
+            ci = 1.96 * std_err;
+        }
+        result.alpha_tickreturn_cov_ci.push_back(ci);
     }
 
     return result;
@@ -399,7 +414,7 @@ Buffer run_with_alpha(OrderBook& lob, QRModel& model, MarketImpact& impact, Alph
     return buffer;
 }
 
-Buffer run_with_race(OrderBook& lob, QRModel& model, MarketImpact& impact, Race& race, Alpha& alpha, int64_t duration, double alpha_scale) {
+Buffer run_with_race(OrderBook& lob, QRModel& model, MarketImpact& impact, Race& race, Alpha& alpha, int64_t duration, double alpha_scale, double theta) {
     Buffer buffer;
     int64_t time = 0;
     int64_t seq = 0;
@@ -499,6 +514,11 @@ Buffer run_with_race(OrderBook& lob, QRModel& model, MarketImpact& impact, Race&
 
                 // Update time to racer timestamp for next iteration
                 time = racer.ts;
+            }
+
+            // Consume alpha after race (information acted upon)
+            if (theta > 0.0) {
+                alpha.consume(theta);
             }
         }
 

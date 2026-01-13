@@ -83,12 +83,13 @@ namespace qr {
     Buffer run_simple(OrderBook& lob, QRModel& model, int64_t duration);
     Buffer run_metaorder(OrderBook& lob, QRModel& model, MarketImpact& impact, MetaOrder& metaorder, int64_t duration);
     Buffer run_with_alpha(OrderBook& lob, QRModel& model, MarketImpact& impact, Alpha& alpha, int64_t duration, double alpha_scale = 1.0);
-    Buffer run_with_race(OrderBook& lob, QRModel& model, MarketImpact& impact, Race& race, Alpha& alpha, int64_t duration, double alpha_scale = 1.0);
+    Buffer run_with_race(OrderBook& lob, QRModel& model, MarketImpact& impact, Race& race, Alpha& alpha, int64_t duration, double alpha_scale = 1.0, double theta = 0.0);
 
     // Alpha PnL computation
     struct AlphaPnL {
         std::vector<double> lag_sec;
         std::vector<double> alpha_tickreturn_cov;
+        std::vector<double> alpha_tickreturn_cov_ci;  // 95% CI half-width
 
         void save_csv(const std::string& path) const;
     };

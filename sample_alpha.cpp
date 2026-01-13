@@ -17,6 +17,7 @@ int main(int argc, char* argv[]) {
         std::cout << "Options:\n";
         std::cout << "  --impact <name>  Impact model: ema_impact or no_impact (default: no_impact)\n";
         std::cout << "  --k <scale>      Alpha scale factor (default: 1.0)\n";
+        std::cout << "  --theta <val>    Alpha consumption per race (default: 0.0)\n";
         std::cout << "  --seed <seed>    Random seed\n";
         std::cout << "  --race           Enable race mechanism\n";
         std::cout << "  --weibull        Use Weibull inter-racer delays (default)\n";
@@ -39,9 +40,10 @@ int main(int argc, char* argv[]) {
     std::string data_path = base_path + "/" + ticker;
     std::string results_path = base_path + "/results/" + ticker + "/";
 
-    // Parse flags: --impact [ema_impact|no_impact] --k [alpha_scale] --seed [seed] --race
+    // Parse flags: --impact [ema_impact|no_impact] --k [alpha_scale] --theta [theta] --seed [seed] --race
     std::string impact_name = "no_impact";
     double alpha_scale = 1.0;
+    double theta = 0.0;  // Alpha consumption per race
     uint64_t master_seed = std::random_device{}();
     bool use_race = false;
     bool use_weibull = true;
@@ -52,6 +54,8 @@ int main(int argc, char* argv[]) {
             impact_name = argv[++i];
         } else if (arg == "--k" && i + 1 < argc) {
             alpha_scale = std::stod(argv[++i]);
+        } else if (arg == "--theta" && i + 1 < argc) {
+            theta = std::stod(argv[++i]);
         } else if (arg == "--seed" && i + 1 < argc) {
             master_seed = std::stoull(argv[++i]);
         } else if (arg == "--race") {
@@ -74,11 +78,15 @@ int main(int argc, char* argv[]) {
     bool use_ema_impact = (impact_name == "ema_impact");
     std::string k_str = std::to_string(alpha_scale);
     k_str = k_str.substr(0, k_str.find('.') + 2);  // trim to 1 decimal
+    std::string theta_str = std::to_string(theta);
+    theta_str = theta_str.substr(0, theta_str.find('.') + 3);  // trim to 2 decimals
     std::string race_str = use_race ? "_race" : "_norace";
-    std::string output_path = results_path + "result_alpha_" + impact_name + "_k" + k_str + race_str + ".parquet";
+    std::string theta_suffix = use_race ? "_theta" + theta_str : "";
+    std::string output_path = results_path + "result_alpha_" + impact_name + "_k" + k_str + race_str + theta_suffix + ".parquet";
 
     std::cout << "Impact: " << impact_name << "\n";
     std::cout << "Alpha scale (k): " << alpha_scale << "\n";
+    std::cout << "Theta: " << theta << "\n";
     std::cout << "Race: " << (use_race ? (use_weibull ? "weibull" : "gamma") : "off") << "\n";
     std::cout << "Master seed: " << master_seed << "\n";
 
@@ -112,10 +120,10 @@ int main(int argc, char* argv[]) {
         LogisticRace race(data_path, use_weibull);
         if (use_ema_impact) {
             EMAImpact impact(0.01, 4.0);
-            result = run_with_race(lob, model, impact, race, alpha, duration, alpha_scale);
+            result = run_with_race(lob, model, impact, race, alpha, duration, alpha_scale, theta);
         } else {
             NoImpact impact;
-            result = run_with_race(lob, model, impact, race, alpha, duration, alpha_scale);
+            result = run_with_race(lob, model, impact, race, alpha, duration, alpha_scale, theta);
         }
     } else {
         if (use_ema_impact) {
