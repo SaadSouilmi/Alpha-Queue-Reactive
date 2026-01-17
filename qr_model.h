@@ -515,7 +515,7 @@ namespace qr {
         // Get total_lvl bin based on current order book state
         // total_lvl = Q_bid + Q_ask (at best levels)
         uint8_t get_total_lvl_bin() {
-            double total_lvl = static_cast<double>(lob_->Q(-1) + lob_->Q(1));
+            double total_lvl = static_cast<double>(lob_->best_bid_vol() + lob_->best_ask_vol());
             const auto& edges = params_.total_lvl_edges;
 
             // Find bin: edges[i] <= total_lvl < edges[i+1]

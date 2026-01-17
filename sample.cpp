@@ -18,6 +18,7 @@ int main(int argc, char* argv[]) {
         std::cout << "  --seed <seed>    Random seed\n";
         std::cout << "  --mix            Use mixture delta_t distribution\n";
         std::cout << "  --race           Enable race mechanism\n";
+        std::cout << "  --impact <name>  Impact model: ema_impact or no_impact (default: no_impact)\n";
         std::cout << "  --weibull        Use Weibull inter-racer delays (default)\n";
         std::cout << "  --gamma          Use Gamma inter-racer delays\n";
         std::cout << "  --use-total-lvl  Use 3D event probabilities (imb, spread, total_lvl)\n";
@@ -39,12 +40,13 @@ int main(int argc, char* argv[]) {
     std::string data_path = base_path + "/" + ticker;
     std::string results_path = base_path + "/results/" + ticker + "/";
 
-    // Parse flags: --seed [seed], --mix, --race, --weibull, --gamma
+    // Parse flags
     uint64_t master_seed = std::random_device{}();
     bool use_mixture = false;
     bool use_race = false;
     bool use_weibull = true;  // default to weibull
     bool use_total_lvl = false;
+    std::string impact_name = "no_impact";
 
     for (int i = 2; i < argc; ++i) {
         std::string arg = argv[i];
@@ -54,6 +56,8 @@ int main(int argc, char* argv[]) {
             use_mixture = true;
         } else if (arg == "--race") {
             use_race = true;
+        } else if (arg == "--impact" && i + 1 < argc) {
+            impact_name = argv[++i];
         } else if (arg == "--weibull") {
             use_weibull = true;
         } else if (arg == "--gamma") {
@@ -62,6 +66,8 @@ int main(int argc, char* argv[]) {
             use_total_lvl = true;
         }
     }
+
+    bool use_ema_impact = (impact_name == "ema_impact");
 
     std::cout << "Using ticker: " << ticker << "\n";
 
@@ -85,10 +91,11 @@ int main(int argc, char* argv[]) {
     // Load queue distributions
     QueueDistributions dists(data_path + "/invariant_distributions_qmax50.csv");
 
-    // Load delta_t if using mixture
+    // Load delta_t if using mixture (floored version for race, regular for no-race)
     std::unique_ptr<MixtureDeltaT> delta_t_ptr;
     if (use_mixture) {
-        delta_t_ptr = std::make_unique<MixtureDeltaT>(data_path + "/delta_t_mixtures.csv");
+        std::string delta_t_file = use_race ? "/delta_t_mixtures_floored.csv" : "/delta_t_mixtures.csv";
+        delta_t_ptr = std::make_unique<MixtureDeltaT>(data_path + delta_t_file);
     }
 
     // Initialize order book
@@ -116,17 +123,22 @@ int main(int argc, char* argv[]) {
 
     int64_t duration = 1e9 * 3600 * 1000;  // 5.5 hours
 
-    auto start = std::chrono::high_resolution_clock::now();
-    Buffer result;
+    // Create optional components (race requires alpha, impact is independent)
+    std::unique_ptr<OUAlpha> alpha_ptr;
+    std::unique_ptr<LogisticRace> race_ptr;
+    std::unique_ptr<MarketImpact> impact_ptr;
+
     if (use_race) {
-        // Create race components
-        EMAImpact impact(0.01, 0.5);  // alpha=0.01, m=0.5
-        OUAlpha alpha(1.0, 0.5, alpha_seed);  // kappa=1/min, s=0.5
-        LogisticRace race(data_path, use_weibull);
-        result = run_with_race(lob, model, impact, race, alpha, duration);
-    } else {
-        result = run_simple(lob, model, duration);
+        alpha_ptr = std::make_unique<OUAlpha>(1.0, 0.5, alpha_seed);  // kappa=1/min, s=0.5
+        race_ptr = std::make_unique<LogisticRace>(data_path, use_weibull);
     }
+    if (use_ema_impact) {
+        impact_ptr = std::make_unique<EMAImpact>(0.01, 0.5);
+    }
+
+    auto start = std::chrono::high_resolution_clock::now();
+    Buffer result = run_simulation(lob, model, duration,
+                                    alpha_ptr.get(), impact_ptr.get(), race_ptr.get());
     auto end = std::chrono::high_resolution_clock::now();
 
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
@@ -140,4 +152,5 @@ int main(int argc, char* argv[]) {
 
     auto save_time = std::chrono::duration_cast<std::chrono::milliseconds>(end_save - start_save);
     std::cout << "Parquet save: " << save_time.count() << " ms\n";
+    std::cout << "Output: " << output_path << "\n";
 }

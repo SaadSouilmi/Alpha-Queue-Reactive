@@ -161,18 +161,23 @@ bool LogisticRace::should_race(double alpha, std::mt19937_64& rng) const {
 std::vector<Order> LogisticRace::generate_racers(double alpha, int64_t base_time,
                                                   int32_t best_bid, int32_t best_ask,
                                                   std::mt19937_64& rng) {
-    std::vector<Order> racers;
+    // Legacy method: use new split functions
+    auto orders = generate_racer_orders(alpha, best_bid, best_ask, rng);
+    assign_timestamps(orders, base_time, rng);
+    return orders;
+}
+
+std::vector<Order> LogisticRace::generate_racer_orders(double alpha,
+                                                        int32_t best_bid, int32_t best_ask,
+                                                        std::mt19937_64& rng) {
+    std::vector<Order> orders;
 
     // Sample number of racers (scales with |α|)
     int num_racers = params_.sample_num_racers(alpha, rng);
 
-    // First racer arrives at base_time + delta
-    int64_t time = base_time + delta_.sample(rng);
-
     std::uniform_real_distribution<double> uniform(0.0, 1.0);
 
     // Compute dynamic probabilities based on alpha
-    // Limit prob decays as |α| increases (strong alpha → less passive positioning)
     double trade_prob, limit_prob, cancel_prob;
     params_.compute_probs(alpha, trade_prob, limit_prob, cancel_prob);
 
@@ -188,39 +193,44 @@ std::vector<Order> LogisticRace::generate_racers(double alpha, int64_t base_time
 
         if (r < thresh_trade) {
             // TRADE: marketable limit at best_ask/best_bid at race trigger
-            // If late (quote moved), naturally rests as limit via partial fill
-            // α > 0 → buy (hit ask), α < 0 → sell (hit bid)
             type = OrderType::Trade;
             side = (alpha > 0) ? Side::Bid : Side::Ask;
             price = (side == Side::Bid) ? best_ask : best_bid;
 
         } else if (r < thresh_limit) {
             // LIMIT: passive positioning on SAME side as alpha direction
-            // α > 0 → add bid at best_bid (queue to buy before price rises)
-            // α < 0 → add ask at best_ask (queue to sell before price drops)
             type = OrderType::Add;
             side = (alpha > 0) ? Side::Bid : Side::Ask;
             price = (side == Side::Bid) ? best_bid : best_ask;
 
         } else {
             // CANCEL: pull quotes to avoid adverse selection
-            // α > 0 → cancel asks (avoid being picked off)
-            // α < 0 → cancel bids
             type = OrderType::Cancel;
             side = (alpha > 0) ? Side::Ask : Side::Bid;
             price = (side == Side::Ask) ? best_ask : best_bid;
         }
 
         int32_t size = params_.sample_racer_size(rng);
-        racers.emplace_back(type, side, price, size, time);
-
-        // Next racer arrives after gamma delay
-        if (i < num_racers - 1) {
-            time += sample_gamma(rng);
-        }
+        // Create order with timestamp=0 (will be assigned later)
+        orders.emplace_back(type, side, price, size, 0);
     }
 
-    return racers;
+    return orders;
+}
+
+void LogisticRace::assign_timestamps(std::vector<Order>& orders, int64_t base_time,
+                                     std::mt19937_64& rng) {
+    if (orders.empty()) return;
+
+    // First order: base_time + delta
+    int64_t time = base_time + delta_.sample(rng);
+    orders[0].ts = time;
+
+    // Subsequent orders: previous + gamma
+    for (size_t i = 1; i < orders.size(); ++i) {
+        time += sample_gamma(rng);
+        orders[i].ts = time;
+    }
 }
 
 } // namespace qr

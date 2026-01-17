@@ -106,9 +106,23 @@ class Race {
 public:
     virtual ~Race() = default;
     virtual bool should_race(double alpha, std::mt19937_64& rng) const = 0;
+
+    // Legacy: generate racers with timestamps (for backward compatibility)
     virtual std::vector<Order> generate_racers(double alpha, int64_t base_time,
                                                int32_t best_bid, int32_t best_ask,
                                                std::mt19937_64& rng) = 0;
+
+    // New: generate orders WITHOUT timestamps
+    virtual std::vector<Order> generate_racer_orders(double alpha,
+                                                      int32_t best_bid, int32_t best_ask,
+                                                      std::mt19937_64& rng) = 0;
+
+    // New: assign timestamps to orders (delta for first, gamma for rest)
+    virtual void assign_timestamps(std::vector<Order>& orders, int64_t base_time,
+                                   std::mt19937_64& rng) = 0;
+
+    // Sample round-trip delay (time for market to see strategy order)
+    virtual int64_t sample_roundtrip(std::mt19937_64& rng) const = 0;
 };
 
 // No-op race (for running without race mechanism)
@@ -122,6 +136,18 @@ public:
                                        std::mt19937_64& /*rng*/) override {
         return {};
     }
+    std::vector<Order> generate_racer_orders(double /*alpha*/,
+                                              int32_t /*best_bid*/, int32_t /*best_ask*/,
+                                              std::mt19937_64& /*rng*/) override {
+        return {};
+    }
+    void assign_timestamps(std::vector<Order>& /*orders*/, int64_t /*base_time*/,
+                          std::mt19937_64& /*rng*/) override {
+        // No-op
+    }
+    int64_t sample_roundtrip(std::mt19937_64& /*rng*/) const override {
+        return 0;  // No delay
+    }
 };
 
 // Logistic race model
@@ -131,9 +157,23 @@ public:
 
     bool should_race(double alpha, std::mt19937_64& rng) const override;
 
+    // Legacy: generate racers with timestamps
     std::vector<Order> generate_racers(double alpha, int64_t base_time,
                                        int32_t best_bid, int32_t best_ask,
                                        std::mt19937_64& rng) override;
+
+    // New: generate orders without timestamps
+    std::vector<Order> generate_racer_orders(double alpha,
+                                              int32_t best_bid, int32_t best_ask,
+                                              std::mt19937_64& rng) override;
+
+    // New: assign timestamps (delta for first, gamma for rest)
+    void assign_timestamps(std::vector<Order>& orders, int64_t base_time,
+                          std::mt19937_64& rng) override;
+
+    int64_t sample_roundtrip(std::mt19937_64& rng) const override {
+        return delta_.sample(rng);
+    }
 
 private:
     RaceParams params_;

@@ -85,6 +85,20 @@ target_link_libraries(sample_alpha
     Parquet::parquet_shared
 )
 
+# Aggressive strategy simulation executable
+add_executable(sample_strategy
+    sample_strategy.cpp
+    orderbook.cpp
+    qr_model.cpp
+    simulation.cpp
+    race.cpp
+)
+
+target_link_libraries(sample_strategy
+    Arrow::arrow_shared
+    Parquet::parquet_shared
+)
+
 # OrderBook test executable
 add_executable(orderbook_tests
     tests/orderbook_test.cpp

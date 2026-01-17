@@ -23,6 +23,7 @@ int main(int argc, char* argv[]) {
         std::cout << "  --weibull        Use Weibull inter-racer delays (default)\n";
         std::cout << "  --gamma          Use Gamma inter-racer delays\n";
         std::cout << "  --use-total-lvl  Use 3D event probabilities (imb, spread, total_lvl)\n";
+        std::cout << "  --old-flow       Use old run_with_race() flow (for testing)\n";
         std::cout << "  -h, --help       Show this help message\n";
     };
 
@@ -49,6 +50,7 @@ int main(int argc, char* argv[]) {
     bool use_race = false;
     bool use_weibull = true;
     bool use_total_lvl = false;
+    bool use_old_flow = false;
 
     for (int i = 2; i < argc; ++i) {
         std::string arg = argv[i];
@@ -68,6 +70,8 @@ int main(int argc, char* argv[]) {
             use_weibull = false;
         } else if (arg == "--use-total-lvl") {
             use_total_lvl = true;
+        } else if (arg == "--old-flow") {
+            use_old_flow = true;
         }
     }
 
@@ -94,6 +98,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Theta: " << theta << "\n";
     std::cout << "Race: " << (use_race ? (use_weibull ? "weibull" : "gamma") : "off") << "\n";
     std::cout << "Total lvl: " << (use_total_lvl ? "on" : "off") << "\n";
+    std::cout << "Old flow: " << (use_old_flow ? "yes" : "no") << "\n";
     std::cout << "Master seed: " << master_seed << "\n";
 
     // Load queue distributions
@@ -123,26 +128,29 @@ int main(int argc, char* argv[]) {
 
     int64_t duration = 1e9 * 3600 * 1000;  // 1000 hours in nanoseconds
 
-    // Run simulation with chosen impact and race setting
-    Buffer result;
-    auto start = std::chrono::high_resolution_clock::now();
+    // Create optional race and impact components
+    std::unique_ptr<LogisticRace> race_ptr;
+    std::unique_ptr<MarketImpact> impact_ptr;
+
     if (use_race) {
-        LogisticRace race(data_path, use_weibull);
-        if (use_ema_impact) {
-            EMAImpact impact(0.01, 4.0);
-            result = run_with_race(lob, model, impact, race, alpha, duration, alpha_scale, theta);
-        } else {
-            NoImpact impact;
-            result = run_with_race(lob, model, impact, race, alpha, duration, alpha_scale, theta);
-        }
+        race_ptr = std::make_unique<LogisticRace>(data_path, use_weibull);
+    }
+    if (use_ema_impact) {
+        impact_ptr = std::make_unique<EMAImpact>(0.01, 4.0);
+    }
+
+    // Run simulation
+    auto start = std::chrono::high_resolution_clock::now();
+    Buffer result;
+    if (use_old_flow && use_race) {
+        // Old flow: run_with_race() requires non-null impact and race
+        EMAImpact default_impact(0.01, 4.0);
+        MarketImpact& impact_ref = impact_ptr ? *impact_ptr : default_impact;
+        result = run_with_race(lob, model, impact_ref, *race_ptr, alpha, duration, alpha_scale, theta);
     } else {
-        if (use_ema_impact) {
-            EMAImpact impact(0.01, 4.0);
-            result = run_with_alpha(lob, model, impact, alpha, duration, alpha_scale);
-        } else {
-            NoImpact impact;
-            result = run_with_alpha(lob, model, impact, alpha, duration, alpha_scale);
-        }
+        result = run_simulation(lob, model, duration,
+                                &alpha, impact_ptr.get(), race_ptr.get(),
+                                alpha_scale, theta);
     }
     auto end = std::chrono::high_resolution_clock::now();
 

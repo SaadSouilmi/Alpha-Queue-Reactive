@@ -37,16 +37,15 @@ def pl_select(condlist: list[pl.Expr], choicelist: list[pl.Expr]) -> pl.Expr:
     )
 
 
-def load_raw_data(loader: DataLoader, ticker: str, lazy: bool = False) -> pl.DataFrame | pl.LazyFrame:
+def load_raw_data(loader: DataLoader, ticker: str) -> pl.DataFrame:
     """Load raw order book data for a ticker.
 
     Args:
         loader: DataLoader instance
         ticker: Ticker symbol
-        lazy: If True, return LazyFrame for memory-efficient processing
 
     Returns:
-        DataFrame or LazyFrame depending on lazy parameter
+        DataFrame with raw order book data
     """
     info = loader.ticker_info(ticker)
     df = loader.load(
@@ -54,10 +53,8 @@ def load_raw_data(loader: DataLoader, ticker: str, lazy: bool = False) -> pl.Dat
         start_date=info["date"].min(),
         end_date=info["date"].max(),
         schema="qr",
-        eager=not lazy,
+        eager=True,
     )
-    if lazy:
-        return df.sort(["date", "ts_event"])
     return df.sort(["date", "ts_event"])
 
 
@@ -1585,6 +1582,18 @@ def main():
         action="store_true",
         help="Use more aggressive memory management (slower but uses less RAM)"
     )
+    parser.add_argument(
+        "--sample-frac",
+        type=float,
+        default=1.0,
+        help="Fraction of data to sample (0.0-1.0, default: 1.0 = all data)"
+    )
+    parser.add_argument(
+        "--max-rows",
+        type=int,
+        default=None,
+        help="Maximum rows to load (default: all). Use for memory-constrained systems."
+    )
     args = parser.parse_args()
 
     ticker = args.ticker
@@ -1605,11 +1614,20 @@ def main():
     # Load raw data for initial computations
     print("Loading raw data...")
     raw_df = load_raw_data(loader, ticker)
+
+    # Apply sampling/row limits if requested
+    if args.max_rows is not None and len(raw_df) > args.max_rows:
+        print(f"  Limiting to {args.max_rows:,} rows (from {len(raw_df):,})...")
+        raw_df = raw_df.head(args.max_rows)
+    if args.sample_frac < 1.0:
+        print(f"  Sampling {args.sample_frac:.0%} of data...")
+        raw_df = raw_df.sample(fraction=args.sample_frac, seed=42)
+
     min_date = raw_df["date"].min()
     max_date = raw_df["date"].max()
     n_days = raw_df["date"].n_unique()
     avg_daily_events = len(raw_df) / n_days
-    print(f"  Loaded {len(raw_df):,} raw events")
+    print(f"  Loaded {len(raw_df):,} events")
     print(f"  Date range: {min_date} to {max_date} ({n_days} days)")
     print(f"  Average daily events: {avg_daily_events:,.0f}")
 
