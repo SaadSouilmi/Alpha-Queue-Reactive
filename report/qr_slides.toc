@@ -1,0 +1,6 @@
+\beamer@sectionintoc {1}{Queue Reactive Model}{2}{0}{1}
+\beamer@sectionintoc {2}{Results}{7}{0}{2}
+\beamer@sectionintoc {3}{Market Impact}{18}{0}{3}
+\beamer@sectionintoc {4}{Signals}{22}{0}{4}
+\beamer@sectionintoc {5}{Round-Trip Time}{24}{0}{5}
+\beamer@sectionintoc {6}{Race Mechanism}{29}{0}{6}

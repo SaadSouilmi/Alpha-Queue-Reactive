@@ -10,6 +10,7 @@ wheels/
 .venv
 
 # C++ build artifacts
+build/
 cmake-build-debug/
 cmake-build-release/
 CMakeFiles/
@@ -27,9 +28,17 @@ data/
 
 # Jupyter checkpoints
 .ipynb_checkpoints/
+.virtual_documents/
 
 # Misc
 *.o
 *.a
 *.so
 *.dylib
+.virtual_documents/
+
+# vcpkg (heavy build artifacts)
+vcpkg/buildtrees/
+vcpkg/downloads/
+vcpkg/installed/
+vcpkg/packages/

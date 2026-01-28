@@ -5,15 +5,14 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -Wall -Wextra")
 
-# Use conda environment for Arrow/Parquet
-if(DEFINED ENV{CONDA_PREFIX})
-    list(APPEND CMAKE_PREFIX_PATH "$ENV{CONDA_PREFIX}")
-endif()
-
-# Find Arrow and Parquet
-find_package(Arrow REQUIRED)
-find_package(Parquet REQUIRED)
+# Find Arrow and Parquet (vcpkg)
+find_package(Arrow CONFIG REQUIRED)
+find_package(Parquet CONFIG REQUIRED)
 find_package(Threads REQUIRED)
+
+# Print available targets for debugging
+message(STATUS "Arrow found: ${Arrow_FOUND}")
+message(STATUS "Parquet found: ${Parquet_FOUND}")
 
 # Fetch Google Test
 include(FetchContent)
@@ -27,82 +26,78 @@ FetchContent_MakeAvailable(googletest)
 # Enable testing
 enable_testing()
 
+# Include directories
+include_directories(cpp/include)
+
+# Source files (library code)
+set(QR_SOURCES
+    cpp/src/orderbook.cpp
+    cpp/src/qr_model.cpp
+    cpp/src/simulation.cpp
+    cpp/src/race.cpp
+)
+
 # Simple simulation executable
 add_executable(sample
-    sample.cpp
-    orderbook.cpp
-    qr_model.cpp
-    simulation.cpp
-    race.cpp
+    cpp/bin/sample.cpp
+    ${QR_SOURCES}
 )
 
 target_link_libraries(sample
-    Arrow::arrow_shared
-    Parquet::parquet_shared
+    Arrow::arrow_static
+    Parquet::parquet_static
 )
 
 # Metaorder simulation executable
 add_executable(run_metaorder
-    run_metaorder.cpp
-    orderbook.cpp
-    qr_model.cpp
-    simulation.cpp
-    race.cpp
+    cpp/bin/run_metaorder.cpp
+    ${QR_SOURCES}
 )
 
 target_link_libraries(run_metaorder
-    Arrow::arrow_shared
-    Parquet::parquet_shared
-		Threads::Threads
+    Arrow::arrow_static
+    Parquet::parquet_static
+    Threads::Threads
 )
 
 # Baseline simulation executable (no metaorder)
 add_executable(run_baseline
-    run_baseline.cpp
-    orderbook.cpp
-    qr_model.cpp
-    simulation.cpp
-    race.cpp
+    cpp/bin/run_baseline.cpp
+    ${QR_SOURCES}
 )
 
 target_link_libraries(run_baseline
-    Arrow::arrow_shared
-    Parquet::parquet_shared
-		Threads::Threads
+    Arrow::arrow_static
+    Parquet::parquet_static
+    Threads::Threads
 )
 
 # Sample with alpha executable
 add_executable(sample_alpha
-    sample_alpha.cpp
-    orderbook.cpp
-    qr_model.cpp
-    simulation.cpp
-    race.cpp
+    cpp/bin/sample_alpha.cpp
+    ${QR_SOURCES}
 )
 
 target_link_libraries(sample_alpha
-    Arrow::arrow_shared
-    Parquet::parquet_shared
+    Arrow::arrow_static
+    Parquet::parquet_static
 )
 
 # Aggressive strategy simulation executable
 add_executable(sample_strategy
-    sample_strategy.cpp
-    orderbook.cpp
-    qr_model.cpp
-    simulation.cpp
-    race.cpp
+    cpp/bin/sample_strategy.cpp
+    ${QR_SOURCES}
 )
 
 target_link_libraries(sample_strategy
-    Arrow::arrow_shared
-    Parquet::parquet_shared
+    Arrow::arrow_static
+    Parquet::parquet_static
 )
 
 # OrderBook test executable
 add_executable(orderbook_tests
     tests/orderbook_test.cpp
-    orderbook.cpp
+    cpp/src/orderbook.cpp
 )
 
 target_link_libraries(orderbook_tests
@@ -112,8 +107,8 @@ target_link_libraries(orderbook_tests
 # QRModel test executable
 add_executable(qr_model_tests
     tests/qr_model_test.cpp
-    orderbook.cpp
-    qr_model.cpp
+    cpp/src/orderbook.cpp
+    cpp/src/qr_model.cpp
 )
 
 target_link_libraries(qr_model_tests

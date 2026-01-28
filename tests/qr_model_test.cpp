@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../qr_model.h"
+#include "qr_model.h"
 #include <set>
 #include <cmath>
 

@@ -1,0 +1,19 @@
+\contentsline {section}{\numberline {1}Introduction}{2}{section.1}%
+\contentsline {subsection}{\numberline {1.1}Motivation}{2}{subsection.1.1}%
+\contentsline {subsection}{\numberline {1.2}Outline}{2}{subsection.1.2}%
+\contentsline {section}{\numberline {2}The Queue-Reactive Model}{2}{section.2}%
+\contentsline {subsection}{\numberline {2.1}State Space}{2}{subsection.2.1}%
+\contentsline {subsection}{\numberline {2.2}Event Types}{3}{subsection.2.2}%
+\contentsline {subsection}{\numberline {2.3}Event Probabilities}{3}{subsection.2.3}%
+\contentsline {subsection}{\numberline {2.4}Spread Conditioning}{3}{subsection.2.4}%
+\contentsline {subsection}{\numberline {2.5}Order Sizes}{3}{subsection.2.5}%
+\contentsline {section}{\numberline {3}Inter-Event Timing: From Exponential to GMM}{4}{section.3}%
+\contentsline {subsection}{\numberline {3.1}Exponential Baseline}{4}{subsection.3.1}%
+\contentsline {subsection}{\numberline {3.2}Empirical Observations}{4}{subsection.3.2}%
+\contentsline {subsection}{\numberline {3.3}Gaussian Mixture Model}{4}{subsection.3.3}%
+\contentsline {subsection}{\numberline {3.4}Conditional GMM}{4}{subsection.3.4}%
+\contentsline {subsection}{\numberline {3.5}Sampling Procedure}{5}{subsection.3.5}%
+\contentsline {subsection}{\numberline {3.6}Floored Delta-t for Race Mechanism}{5}{subsection.3.6}%
+\contentsline {section}{\numberline {4}Market Impact}{5}{section.4}%
+\contentsline {section}{\numberline {5}Race Mechanism}{5}{section.5}%
+\contentsline {section}{\numberline {6}Calibration and Results}{5}{section.6}%
