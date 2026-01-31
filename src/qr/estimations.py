@@ -1,0 +1,264 @@
+import json
+from pathlib import Path
+
+import numpy as np
+import polars as pl
+from datasketches import kll_ints_sketch
+from lobib.utils import pl_select
+from tqdm import tqdm
+
+N_BINS = 11
+BINS = np.arange(11, step=1) / 10
+
+
+def save_params(
+    path: Path,
+    median_event_sizes: dict[int, int],
+    total_best_quantiles: np.ndarray,
+) -> None:
+    data = {
+        "median_event_sizes": median_event_sizes,
+        "total_best_quantiles": total_best_quantiles.tolist(),
+    }
+    with open(path, "w") as f:
+        json.dump(data, f)
+
+
+def load_params(path: Path) -> tuple[dict[int, int], np.ndarray]:
+    with open(path) as f:
+        data = json.load(f)
+    median_event_sizes = {int(k): v for k, v in data["median_event_sizes"].items()}
+    total_best_quantiles = np.array(data["total_best_quantiles"])
+    return median_event_sizes, total_best_quantiles
+
+
+def compute_median_event_sizes(files: list[str]) -> dict[int, int]:
+    sketches = {i: kll_ints_sketch(50000) for i in range(1, 5)}
+
+    for path in tqdm(files, colour="green", leave=True, position=0):
+        chunk = (
+            pl.scan_parquet(path)
+            .filter(
+                pl.col("event_side").replace({"A": 1, "B": -1}).cast(int)
+                * pl.col("event_queue_nbr")
+                >= 0
+            )
+            .with_columns(
+                event_q=pl.when(pl.col("event_queue_nbr").lt(0))
+                .then(pl.col("event_queue_nbr") - pl.col("best_bid_nbr") - 1)
+                .otherwise(pl.col("event_queue_nbr") - pl.col("best_ask_nbr") + 1)
+            )
+            .select(
+                queue=pl.col("event_q").abs(),
+                size=pl.col("event_size"),
+            )
+            .filter(pl.col("queue").is_between(1, 4))
+            .collect()
+        )
+
+        for q in range(1, 5):
+            vals = (
+                chunk.filter(pl.col("queue") == q)["size"].to_numpy().astype(np.int32)
+            )
+            if len(vals):
+                sketches[q].update(vals)
+            del vals
+
+        del chunk
+
+    return {i: int(sketches[i].get_quantile(0.5)) for i in range(1, 5)}
+
+
+def compute_total_best_quantiles(
+    files: list[str], median_event_sizes: dict[int, int]
+) -> np.ndarray:
+    sketch = kll_ints_sketch(50000)
+
+    q1_median = median_event_sizes[1]
+    for path in tqdm(files, colour="green", leave=True, position=0):
+        chunk = pl.scan_parquet(path).filter(
+            pl.col("event_side").replace({"A": 1, "B": -1}).cast(int)
+            * pl.col("event_queue_nbr")
+            >= 0
+        )
+
+        condlist = [pl.col("best_bid_nbr").eq(-i) for i in range(1, 11)]
+        choicelist = [pl.col(f"Q_{-i}") for i in range(1, 11)]
+        best_bid = pl_select(condlist, choicelist).truediv(q1_median).ceil()
+
+        condlist = [pl.col("best_ask_nbr").eq(i) for i in range(1, 11)]
+        choicelist = [pl.col(f"Q_{i}") for i in range(1, 11)]
+        best_ask = pl_select(condlist, choicelist).truediv(q1_median).ceil()
+
+        chunk = chunk.select(total_best=best_ask + best_bid).collect()
+
+        vals = chunk["total_best"].to_numpy().astype(np.int32)
+        if len(vals):
+            sketch.update(vals)
+        del vals, chunk
+
+    return np.array([sketch.get_quantile(p) for p in [0.2, 0.4, 0.6, 0.8]])
+
+
+def compute_queue_levels(
+    df: pl.DataFrame, median_event_sizes: dict[int, int]
+) -> pl.DataFrame:
+    results = {}
+
+    for level in range(4, 0, -1):
+        condlist = [pl.col("best_ask_nbr").eq(i) for i in range(1, 11)]
+        choicelist = [
+            pl.col(f"Q_{i + level - 1}") if i + level - 1 <= 10 else pl.lit(None)
+            for i in range(1, 11)
+        ]
+        results[f"q_{level}"] = (
+            pl_select(condlist, choicelist)
+            .truediv(median_event_sizes[level])
+            .ceil()
+            .cast(pl.Int64)
+        )
+
+    for level in range(1, 5):
+        condlist = [pl.col("best_bid_nbr").eq(i) for i in range(-1, -11, -1)]
+        choicelist = [
+            pl.col(f"Q_{i - level + 1}") if i - level + 1 >= -10 else pl.lit(None)
+            for i in range(-1, -11, -1)
+        ]
+        results[f"q_{-level}"] = (
+            pl_select(condlist, choicelist)
+            .truediv(median_event_sizes[level])
+            .ceil()
+            .cast(pl.Int64)
+        )
+
+    return df.with_columns(**results)
+
+
+def compute_imbalance(df: pl.LazyFrame, bins: np.ndarray) -> pl.LazyFrame:
+    condlist = [
+        *[
+            pl.col("imbalance").ge(left) & pl.col("imbalance").lt(right)
+            for left, right in zip(-bins[1:][::-1], -bins[:-1][::-1])
+        ],
+        pl.col("imbalance").eq(0),
+        *[
+            pl.col("imbalance").gt(left) & pl.col("imbalance").le(right)
+            for left, right in zip(bins[:-1], bins[1:])
+        ],
+    ]
+    choicelist = [*(-bins[1:][::-1]), 0, *bins[1:]]
+    df = df.with_columns(
+        imbalance=(pl.col("q_-1") - pl.col("q_1")) / (pl.col("q_-1") + pl.col("q_1"))
+    )
+    df = df.with_columns(imbalance=pl_select(condlist, choicelist))
+
+    return df
+
+
+def compute_total_best_bin(df: pl.LazyFrame, quantiles: list[float]) -> pl.LazyFrame:
+    df = df.with_columns(total_best=pl.col("q_1") + pl.col("q_-1"))
+
+    condlist = []
+    choicelist = []
+
+    condlist.append(pl.col("total_best").lt(quantiles[0]))
+    choicelist.append(0)
+
+    for i in range(len(quantiles) - 1):
+        cond = pl.col("total_best").ge(quantiles[i]) & pl.col("total_best").lt(
+            quantiles[i + 1]
+        )
+        condlist.append(cond)
+        choicelist.append(i + 1)
+
+    condlist.append(pl.col("total_best").ge(quantiles[-1]))
+    choicelist.append(len(quantiles))
+
+    return df.with_columns(total_best=pl_select(condlist, choicelist))
+
+
+def preprocess(
+    df: pl.LazyFrame,
+    median_event_sizes: dict[int, int],
+    bins: np.ndarray,
+    total_best_quantiles: list[float],
+) -> pl.LazyFrame:
+    df = df.filter(
+        (
+            pl.col("event_side")
+            .replace({"A": 1, "B": -1})
+            .cast(int)
+            .mul(pl.col("event_queue_nbr"))
+            >= 0
+        )
+    )
+    df = df.with_columns(
+        pl.when(pl.col("event_queue_nbr").lt(0))
+        .then(pl.col("event_queue_nbr").sub(pl.col("best_bid_nbr")).sub(1))
+        .otherwise(pl.col("event_queue_nbr").sub(pl.col("best_ask_nbr")).add(1))
+        .alias("event_q")
+    )
+    df = df.filter(pl.col("event_q").abs().le(2))
+    df = df.with_columns(
+        pl.when(pl.col("spread").ge(2))
+        .then(2)
+        .otherwise(pl.col("spread"))
+        .alias("spread")
+    )
+    df = df.with_columns(
+        event_side=pl.col("event_side").replace({"A": 1, "B": -1}).cast(int)
+    )
+    df = df.with_columns(
+        pl.col("event").replace({"Can": "Cancel", "Trd": "Trade", "Trd_All": "Trade"})
+    )
+    df = compute_queue_levels(df, median_event_sizes)
+    df = compute_imbalance(df, bins)
+    df = compute_total_best_bin(df, quantiles=total_best_quantiles)
+    df = df.with_columns(delta_t=pl.col("ts_event").diff().cast(int))
+    df = df.with_columns(
+        event_size=pl.when(pl.col("event_q").abs().eq(1))
+        .then(pl.col("event_size").truediv(median_event_sizes[1]).ceil().cast(int))
+        .otherwise(pl.col("event_size").truediv(median_event_sizes[2]).ceil().cast(int))
+    )
+
+    return df.select(
+        pl.exclude(
+            "^Q.*$",
+            "^P.*$",
+            "best_ask_nbr",
+            "best_bid_nbr",
+            "symbol",
+            "event_queue_size",
+            "event_queue_nbr",
+            "price",
+        )
+    ).rename(
+        {
+            "event_side": "side",
+            "event_q": "queue",
+            "event_size": "size",
+        }
+    )
+
+
+def daily_estimates(df: pl.LazyFrame) -> pl.LazyFrame:
+    stats = df.group_by(
+        "date",
+        "imbalance",
+        "spread",
+        "total_best",
+        "event",
+        "side",
+        "queue",
+    ).agg(
+        pl.len(),
+        pl.col("size"),
+        pl.col("delta_t"),
+        delta_t_sum=pl.col("delta_t").sum(),
+        *(
+            pl.concat([pl.col(f"q_{i}"), pl.col(f"q_-{i}")]).alias(f"q_{i}")
+            for i in range(1, 5)
+        ),
+    )
+
+    return stats
