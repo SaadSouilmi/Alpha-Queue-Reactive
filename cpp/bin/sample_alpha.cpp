@@ -149,8 +149,7 @@ int main(int argc, char* argv[]) {
         result = run_with_race(lob, model, impact_ref, *race_ptr, alpha, duration, alpha_scale, theta);
     } else {
         result = run_simulation(lob, model, duration,
-                                &alpha, impact_ptr.get(), race_ptr.get(),
-                                alpha_scale, theta);
+                                &alpha, impact_ptr.get(), race_ptr.get());
     }
     auto end = std::chrono::high_resolution_clock::now();
 

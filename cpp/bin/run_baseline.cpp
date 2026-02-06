@@ -97,7 +97,6 @@ struct Accumulator {
     std::vector<int64_t> grid;
     std::vector<double> mid_sum;
     std::vector<double> bias_sum;
-    std::vector<double> sign_mean_sum;
     // Trade prob sums per bin: [bin][grid_point]
     std::array<std::vector<double>, QRParams::NUM_IMB_BINS> bid_trade_prob_sum;
     std::array<std::vector<double>, QRParams::NUM_IMB_BINS> ask_trade_prob_sum;
@@ -110,7 +109,6 @@ struct Accumulator {
 
             mid_sum.push_back(0.0);
             bias_sum.push_back(0.0);
-            sign_mean_sum.push_back(0.0);
         }
         for (int bin = 0; bin < QRParams::NUM_IMB_BINS; bin++) {
             bid_trade_prob_sum[bin].resize(grid.size(), 0.0);
@@ -126,7 +124,6 @@ struct Accumulator {
 
         std::vector<double> proj_mid(grid.size(), 0.0);
         std::vector<double> proj_bias(grid.size(), 0.0);
-        std::vector<double> proj_sign_mean(grid.size(), 0.0);
         std::array<std::vector<double>, QRParams::NUM_IMB_BINS> proj_bid_prob;
         std::array<std::vector<double>, QRParams::NUM_IMB_BINS> proj_ask_prob;
         for (int bin = 0; bin < QRParams::NUM_IMB_BINS; bin++) {
@@ -150,7 +147,6 @@ struct Accumulator {
                               buffer.records[j].best_ask_price) / 2.0;
                 proj_mid[i] = mid - mid0;
                 proj_bias[i] = buffer.records[j].bias;
-                proj_sign_mean[i] = buffer.records[j].trade_sign_mean;
             }
             if (k < prob_records.size()) {
                 for (int bin = 0; bin < QRParams::NUM_IMB_BINS; bin++) {
@@ -164,7 +160,6 @@ struct Accumulator {
         for (size_t i = 0; i < grid.size(); i++) {
             mid_sum[i] += proj_mid[i];
             bias_sum[i] += proj_bias[i];
-            sign_mean_sum[i] += proj_sign_mean[i];
             for (int bin = 0; bin < QRParams::NUM_IMB_BINS; bin++) {
                 bid_trade_prob_sum[bin][i] += proj_bid_prob[bin][i];
                 ask_trade_prob_sum[bin][i] += proj_ask_prob[bin][i];
@@ -175,13 +170,13 @@ struct Accumulator {
 
     void save_csv(const std::string& path) {
         std::ofstream file(path);
-        file << "timestamp,avg_mid_price_change,avg_bias,avg_trade_sign_mean";
+        file << "timestamp,avg_mid_price_change,avg_bias";
         for (int bin = 0; bin < QRParams::NUM_IMB_BINS; bin++) {
             file << ",bin_" << bin << "_bid_trade_prob,bin_" << bin << "_ask_trade_prob";
         }
         file << "\n";
         for (size_t i = 0; i < grid.size(); i++) {
-            file << grid[i] << "," << (mid_sum[i] / count) << "," << (bias_sum[i] / count) << "," << (sign_mean_sum[i] / count);
+            file << grid[i] << "," << (mid_sum[i] / count) << "," << (bias_sum[i] / count);
             for (int bin = 0; bin < QRParams::NUM_IMB_BINS; bin++) {
                 file << "," << (bid_trade_prob_sum[bin][i] / count) << "," << (ask_trade_prob_sum[bin][i] / count);
             }
@@ -228,15 +223,13 @@ void run_and_accumulate(const std::string& data_path, const QueueDistributions& 
     // Run simulation without metaorder - just QR model
     Buffer buffer;
     std::vector<TradeProbRecord> prob_records;
+    std::vector<Fill> fills;
     int64_t time = 0;
     double current_bias = 0.0;
-    double sign_sum = 0.0;
-    int trade_count = 0;
-    double current_sign_mean = 0.0;
-
     Order order;
     while (time < duration) {
-        current_bias = impact.bias_factor(time);
+        impact.step(time);
+        current_bias = impact.bias_factor();
         model.bias(current_bias);
 
         // Capture trade probs for all bins after bias is applied
@@ -256,19 +249,24 @@ void run_and_accumulate(const std::string& data_path, const QueueDistributions& 
 
         EventRecord record;
         record.record_lob(lob);
-        lob.process(order);
-        record.record_order(order);
-        record.bias = current_bias;
 
         if (order.type == OrderType::Trade) {
-            impact.update(order.side, time);
-            double sign = (order.side == Side::Bid) ? -1.0 : 1.0;
-            sign_sum += sign;
-            trade_count++;
-            current_sign_mean = sign_sum / trade_count;
-        }
-        record.trade_sign_mean = current_sign_mean;
+            fills.clear();
+            lob.process(order, &fills);
 
+            int32_t filled_size = 0;
+            for (const auto& fill : fills) {
+                filled_size += fill.size;
+            }
+            if (filled_size > 0) {
+                impact.update(order.side, order.ts, filled_size);
+            }
+        } else {
+            lob.process(order);
+        }
+
+        record.record_order(order);
+        record.bias = current_bias;
         buffer.records.push_back(record);
     }
 

@@ -47,18 +47,14 @@ struct RaceParams {
     double threshold = 0.7;       // logistic inflection point
     double steepness = 8.0;       // logistic steepness
 
-    // Base order type probabilities (at threshold |α|)
-    // Races only trigger at spread = 1
-    double base_trade_prob = 0.45;   // 45% trades (if late, naturally rest as limits)
-    double base_limit_prob = 0.30;   // 30% limit orders (same side as alpha)
-    double base_cancel_prob = 0.25;  // 25% cancels
-
-    // Limit probability decay: limit_prob decreases as |α| increases above threshold
-    double limit_decay_rate = 0.5;   // How fast limit_prob decays with excess alpha
+    // Order type probabilities (constant, no limits in races)
+    double trade_prob = 0.65;   // 65% trades
+    double cancel_prob = 0.35;  // 35% cancels
 
     double base_mean_racers = 4.0;  // base geometric mean for number of racers
     double racer_scale = 2.5;       // scale factor: mean = base + scale * (|α| - threshold)
     double mean_size = 3.0;       // geometric mean for racer size
+    double alpha_decay = 0.0;     // fraction of alpha consumed after race (0 = no decay)
 
     // P(race|α) = 0 if |α| < min_threshold, else logistic
     double race_probability(double alpha) const {
@@ -67,21 +63,7 @@ struct RaceParams {
         return 1.0 / (1.0 + std::exp(-steepness * (abs_alpha - threshold)));
     }
 
-    // Compute dynamic probabilities given alpha
-    // Limit prob decays as |α| increases; freed probability goes to trades/cancels
-    void compute_probs(double alpha, double& trade_prob, double& limit_prob, double& cancel_prob) const {
-        double abs_alpha = std::abs(alpha);
-        double excess = std::max(0.0, abs_alpha - threshold);
-
-        // Limit prob decays exponentially with excess alpha
-        double decay = std::exp(-limit_decay_rate * excess);
-        limit_prob = base_limit_prob * decay;
-
-        // Redistribute freed probability: 60% to trades, 40% to cancels
-        double freed = base_limit_prob - limit_prob;
-        trade_prob = base_trade_prob + freed * 0.6;
-        cancel_prob = base_cancel_prob + freed * 0.4;
-    }
+    // Probabilities are constant (no limits, no dynamic adjustment)
 
     // Sample number of racers from geometric distribution (mean scales with |α|)
     int sample_num_racers(double alpha, std::mt19937_64& rng) const {
@@ -90,7 +72,7 @@ struct RaceParams {
         double mean = base_mean_racers + racer_scale * std::max(0.0, abs_alpha - threshold);
         double p = 1.0 / mean;
         std::geometric_distribution<int> dist(p);
-        return dist(rng) + 1;  // at least 1 racer
+        return std::max(3, dist(rng) + 1);  // at least 3 racers
     }
 
     // Sample racer size from geometric distribution
@@ -123,6 +105,9 @@ public:
 
     // Sample round-trip delay (time for market to see strategy order)
     virtual int64_t sample_roundtrip(std::mt19937_64& rng) const = 0;
+
+    // Alpha decay fraction after race
+    virtual double alpha_decay() const = 0;
 };
 
 // No-op race (for running without race mechanism)
@@ -148,12 +133,14 @@ public:
     int64_t sample_roundtrip(std::mt19937_64& /*rng*/) const override {
         return 0;  // No delay
     }
+    double alpha_decay() const override { return 0.0; }
 };
 
 // Logistic race model
 class LogisticRace : public Race {
 public:
     LogisticRace(const std::string& data_path, bool use_weibull);
+    LogisticRace(const std::string& data_path, bool use_weibull, const RaceParams& params);
 
     bool should_race(double alpha, std::mt19937_64& rng) const override;
 
@@ -174,6 +161,7 @@ public:
     int64_t sample_roundtrip(std::mt19937_64& rng) const override {
         return delta_.sample(rng);
     }
+    double alpha_decay() const override { return params_.alpha_decay; }
 
 private:
     RaceParams params_;

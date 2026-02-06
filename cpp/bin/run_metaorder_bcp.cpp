@@ -16,7 +16,6 @@ struct Accumulator {
     std::vector<int64_t> grid;
     std::vector<double> mid_sum;
     std::vector<double> bias_sum;
-    std::vector<double> sign_mean_sum;
     std::mutex mtx;
     int count = 0;
 
@@ -26,7 +25,6 @@ struct Accumulator {
 
             mid_sum.push_back(0.0);
             bias_sum.push_back(0.0);
-            sign_mean_sum.push_back(0.0);
         }
     }
 
@@ -38,8 +36,6 @@ struct Accumulator {
 
         std::vector<double> proj_mid(grid.size(), 0.0);
         std::vector<double> proj_bias(grid.size(), 0.0);
-        std::vector<double> proj_sign_mean(grid.size(), 0.0);
-
         size_t j = 0;
         for (size_t i = 0; i < grid.size(); i++) {
             while (j + 1 < buffer.records.size() &&
@@ -51,7 +47,6 @@ struct Accumulator {
                               buffer.records[j].best_ask_price) / 2.0;
                 proj_mid[i] = mid - mid0;
                 proj_bias[i] = buffer.records[j].bias;
-                proj_sign_mean[i] = buffer.records[j].trade_sign_mean;
             }
         }
 
@@ -59,16 +54,15 @@ struct Accumulator {
         for (size_t i = 0; i < grid.size(); i++) {
             mid_sum[i] += proj_mid[i];
             bias_sum[i] += proj_bias[i];
-            sign_mean_sum[i] += proj_sign_mean[i];
         }
         count++;
     }
 
     void save_csv(const std::string& path) {
         std::ofstream file(path);
-        file << "timestamp,avg_mid_price_change,avg_bias,avg_trade_sign_mean\n";
+        file << "timestamp,avg_mid_price_change,avg_bias\n";
         for (size_t i = 0; i < grid.size(); i++) {
-            file << grid[i] << "," << (mid_sum[i] / count) << "," << (bias_sum[i] / count) << "," << (sign_mean_sum[i] / count) << "\n";
+            file << grid[i] << "," << (mid_sum[i] / count) << "," << (bias_sum[i] / count) << "\n";
         }
     }
 };

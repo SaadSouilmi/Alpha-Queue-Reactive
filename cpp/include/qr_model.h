@@ -7,6 +7,7 @@
 #include <cmath>
 #include <fstream>
 #include <sstream>
+#include <iostream>
 
 namespace qr {
 
@@ -144,26 +145,40 @@ namespace qr {
     class MarketImpact {
     public:
         virtual ~MarketImpact() = default;
-        virtual void update(Side side, int64_t time) = 0;
-        virtual double bias_factor(int64_t current_time) const = 0;
+        // Advance time (decay for time-based models, no-op for others)
+        virtual void step(int64_t time) = 0;
+        // Add trade impact with sqrt(size) scaling
+        virtual void add_trade(Side side, int32_t size = 1) = 0;
+        // Get current bias factor
+        virtual double bias_factor() const = 0;
+
+        // Convenience: step + add_trade in one call
+        void update(Side side, int64_t time, int32_t size = 1) {
+            step(time);
+            add_trade(side, size);
+        }
     };
 
     class NoImpact : public MarketImpact {
     public:
-        void update(Side /*side*/, int64_t /*time*/) override {}
-        double bias_factor(int64_t /*current_time*/) const override { return 0.0; }
+        void step(int64_t /*time*/) override {}
+        void add_trade(Side /*side*/, int32_t /*size*/ = 1) override {}
+        double bias_factor() const override { return 0.0; }
     };
 
     class EMAImpact : public MarketImpact {
     public:
         EMAImpact(double alpha, double m) : alpha_(alpha), m_(m), ewma_(0.0) {}
 
-        void update(Side side, int64_t /*time*/) override {
-            double side_value = (side == Side::Bid) ? -1.0 : 1.0;
-            ewma_ = alpha_ * side_value + (1 - alpha_) * ewma_;
+        void step(int64_t /*time*/) override {}  // EMA doesn't decay with time
+
+        void add_trade(Side side, int32_t size = 1) override {
+            double sign = (side == Side::Bid) ? -1.0 : 1.0;
+            double impact = sign * std::sqrt(static_cast<double>(size));
+            ewma_ = alpha_ * impact + (1 - alpha_) * ewma_;
         }
 
-        double bias_factor(int64_t /*current_time*/) const override {
+        double bias_factor() const override {
             return ewma_ * m_;
         }
 
@@ -175,45 +190,85 @@ namespace qr {
         double ewma_;
     };
 
+    class TimeDecayImpact : public MarketImpact {
+    public:
+        // half_life_sec: half-life of impact decay in seconds
+        // m: bias multiplier
+        TimeDecayImpact(double half_life_sec, double m)
+            : kappa_ns_(std::log(2.0) / (half_life_sec * 1e9)), m_(m) {}
+
+        void step(int64_t time) override {
+            // Decay phi to current time
+            if (last_time_ > 0 && time > last_time_) {
+                double dt = static_cast<double>(time - last_time_);
+                phi_ *= std::exp(-kappa_ns_ * dt);
+            }
+            last_time_ = time;
+        }
+
+        void add_trade(Side side, int32_t size = 1) override {
+            double sign = (side == Side::Ask) ? 1.0 : -1.0;
+            phi_ += sign * std::sqrt(static_cast<double>(size));
+        }
+
+        double bias_factor() const override {
+            return m_ * phi_;
+        }
+
+        double phi() const { return phi_; }
+
+    private:
+        double kappa_ns_;           // decay rate per nanosecond
+        double m_;                  // bias multiplier
+        double phi_ = 0.0;          // accumulated impact
+        int64_t last_time_ = 0;     // last update time (ns)
+    };
+
     class PowerLawImpact : public MarketImpact {
     public:
         PowerLawImpact(double alpha, double A, double m, double eps = 1.5e9)
             : alpha_(alpha), A_(A), m_(m), eps_(eps) {}
 
-        void update(Side side, int64_t time) override {
-            double sign = (side == Side::Bid) ? -1.0 : 1.0;
-            timestamps_.push_back(time);
-            signs_.push_back(sign);
+        void step(int64_t time) override {
+            current_time_ = time;
         }
 
-        double bias_factor(int64_t current_time) const override {
+        void add_trade(Side side, int32_t size = 1) override {
+            double sign = (side == Side::Bid) ? -1.0 : 1.0;
+            double impact = sign * std::sqrt(static_cast<double>(size));
+            timestamps_.push_back(current_time_);
+            impacts_.push_back(impact);
+        }
+
+        double bias_factor() const override {
             double sum = 0.0;
             for (size_t i = 0; i < timestamps_.size(); i++) {
-                double dt = static_cast<double>(current_time - timestamps_[i]) + eps_;
+                double dt = static_cast<double>(current_time_ - timestamps_[i]) + eps_;
                 double kernel;
                 if (alpha_ == 0.5)       kernel = 1.0 / std::sqrt(dt);
                 else if (alpha_ == 1.0)  kernel = 1.0 / dt;
                 else if (alpha_ == 1.5)  kernel = 1.0 / (dt * std::sqrt(dt));
                 else                     kernel = std::pow(dt, -alpha_);
-                sum += signs_[i] * kernel;
+                sum += impacts_[i] * kernel;
             }
             return std::clamp(A_ * sum, -m_, m_);
         }
 
         void clear() {
             timestamps_.clear();
-            signs_.clear();
+            impacts_.clear();
         }
 
-        size_t size() const { return timestamps_.size(); }
+        size_t num_trades() const { return timestamps_.size(); }
 
     private:
         double alpha_;
         double A_;
         double m_;
         double eps_;
+        int64_t current_time_ = 0;
         std::vector<int64_t> timestamps_;
-        std::vector<double> signs_;
+        std::vector<double> impacts_;
     };
 
     class LinearImpact : public MarketImpact {
@@ -221,22 +276,26 @@ namespace qr {
         LinearImpact(double B, double A, double t0)
             : B_(B), A_(A), t0_(t0) {}
 
-        void update(Side side, int64_t time) override {
-            if (time == t0_)
+        void step(int64_t time) override {
+            current_time_ = time;
+            if (time >= t0_)
                 on_ = true;
         }
-        double bias_factor(int64_t current_time) const override {
+
+        void add_trade(Side /*side*/, int32_t /*size*/ = 1) override {}
+
+        double bias_factor() const override {
             if (!on_)
                 return 0.0;
-            double b = B_ + A_ * static_cast<double>(current_time - t0_);
+            double b = B_ + A_ * static_cast<double>(current_time_ - t0_);
             return std::max(b, 0.0);
         }
-
 
     private:
         double B_;
         double A_;
         int64_t t0_;
+        int64_t current_time_ = 0;
         bool on_ = false;
     };
 
@@ -474,8 +533,17 @@ namespace qr {
         }
 
         void bias(double b) {
-            StateParams& state_params = get_state_params();
-            state_params.bias(b);
+            uint8_t imb_bin = get_imbalance_bin(lob_->imbalance());
+            int32_t spread = std::min(lob_->spread() - 1, 1);
+
+            if (params_.use_total_lvl) {
+                // Apply bias to 3D state params (used for event sampling)
+                uint8_t total_lvl_bin = get_total_lvl_bin();
+                params_.get_3d(imb_bin, spread, total_lvl_bin).bias(b);
+            } else {
+                // Apply bias to 2D state params
+                params_.get(imb_bin, spread).bias(b);
+            }
         }
 
     private:

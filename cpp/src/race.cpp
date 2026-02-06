@@ -150,6 +150,18 @@ LogisticRace::LogisticRace(const std::string& data_path, bool use_weibull)
     }
 }
 
+LogisticRace::LogisticRace(const std::string& data_path, bool use_weibull, const RaceParams& params)
+    : params_(params),
+      delta_(data_path + "/delta_distrib.csv"),
+      use_weibull_(use_weibull)
+{
+    if (use_weibull_) {
+        weibull_ = std::make_unique<WeibullDistrib>(data_path + "/weibull_distrib.csv");
+    } else {
+        gamma_ = std::make_unique<GammaDistrib>(data_path + "/gamma_distrib.csv");
+    }
+}
+
 bool LogisticRace::should_race(double alpha, std::mt19937_64& rng) const {
     double p = params_.race_probability(alpha);
     if (p <= 0.0) return false;
@@ -177,31 +189,17 @@ std::vector<Order> LogisticRace::generate_racer_orders(double alpha,
 
     std::uniform_real_distribution<double> uniform(0.0, 1.0);
 
-    // Compute dynamic probabilities based on alpha
-    double trade_prob, limit_prob, cancel_prob;
-    params_.compute_probs(alpha, trade_prob, limit_prob, cancel_prob);
-
-    // Cumulative thresholds for order type sampling
-    double thresh_trade = trade_prob;
-    double thresh_limit = thresh_trade + limit_prob;
-
     for (int i = 0; i < num_racers; ++i) {
         double r = uniform(rng);
         OrderType type;
         Side side;
         int32_t price;
 
-        if (r < thresh_trade) {
+        if (r < params_.trade_prob) {
             // TRADE: marketable limit at best_ask/best_bid at race trigger
             type = OrderType::Trade;
-            side = (alpha > 0) ? Side::Bid : Side::Ask;
-            price = (side == Side::Bid) ? best_ask : best_bid;
-
-        } else if (r < thresh_limit) {
-            // LIMIT: passive positioning on SAME side as alpha direction
-            type = OrderType::Add;
-            side = (alpha > 0) ? Side::Bid : Side::Ask;
-            price = (side == Side::Bid) ? best_bid : best_ask;
+            side = (alpha > 0) ? Side::Ask : Side::Bid;
+            price = (side == Side::Ask) ? best_ask : best_bid;
 
         } else {
             // CANCEL: pull quotes to avoid adverse selection

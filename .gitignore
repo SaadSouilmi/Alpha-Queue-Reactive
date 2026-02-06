@@ -44,3 +44,5 @@ vcpkg/installed/
 vcpkg/packages/
 
 report/
+markdown/
+configs/

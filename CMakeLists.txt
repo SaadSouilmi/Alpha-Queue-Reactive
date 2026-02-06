@@ -9,6 +9,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -Wall -Wextra")
 find_package(Arrow CONFIG REQUIRED)
 find_package(Parquet CONFIG REQUIRED)
 find_package(Threads REQUIRED)
+find_package(RapidJSON CONFIG REQUIRED)
 
 # Print available targets for debugging
 message(STATUS "Arrow found: ${Arrow_FOUND}")
@@ -90,6 +91,19 @@ add_executable(sample_strategy
 )
 
 target_link_libraries(sample_strategy
+    Arrow::arrow_static
+    Parquet::parquet_static
+)
+
+# HFT alpha with configurable race params (JSON config)
+add_executable(sample_hft_alpha
+    cpp/bin/sample_hft_alpha.cpp
+    ${QR_SOURCES}
+)
+
+target_include_directories(sample_hft_alpha PRIVATE ${RAPIDJSON_INCLUDE_DIRS})
+
+target_link_libraries(sample_hft_alpha
     Arrow::arrow_static
     Parquet::parquet_static
 )

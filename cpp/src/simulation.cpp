@@ -91,21 +91,21 @@ void Buffer::save_parquet(const std::string& path) const {
 
     auto schema = arrow::schema({
         arrow::field("sequence", arrow::int64()),
-        arrow::field("P_-1", arrow::int32()),
-        arrow::field("Q_-1", arrow::int32()),
-        arrow::field("P_1", arrow::int32()),
-        arrow::field("Q_1", arrow::int32()),
-        arrow::field("P_-2", arrow::int32()),
-        arrow::field("Q_-2", arrow::int32()),
-        arrow::field("P_2", arrow::int32()),
-        arrow::field("Q_2", arrow::int32()),
-        arrow::field("imb", arrow::float64()),
+        arrow::field("p_-1", arrow::int32()),
+        arrow::field("q_-1", arrow::int32()),
+        arrow::field("p_1", arrow::int32()),
+        arrow::field("q_1", arrow::int32()),
+        arrow::field("p_-2", arrow::int32()),
+        arrow::field("q_-2", arrow::int32()),
+        arrow::field("p_2", arrow::int32()),
+        arrow::field("q_2", arrow::int32()),
+        arrow::field("imbalance", arrow::float64()),
         arrow::field("mid", arrow::float64()),
         arrow::field("ts_event", arrow::int64()),
         arrow::field("event", arrow::utf8()),
-        arrow::field("event_side", arrow::int8()),
+        arrow::field("side", arrow::int8()),
         arrow::field("price", arrow::int32()),
-        arrow::field("event_size", arrow::int32()),
+        arrow::field("size", arrow::int32()),
         arrow::field("rejected", arrow::boolean()),
         arrow::field("partial", arrow::boolean()),
         arrow::field("bias", arrow::float64()),
@@ -258,13 +258,11 @@ Buffer run_metaorder(OrderBook& lob, QRModel& model, MarketImpact& impact, MetaO
     size_t i = 0;
     size_t n = metaorder.timestamps.size();
     double current_bias = 0.0;
-    double sign_sum = 0.0;
-    int trade_count = 0;
-    double current_sign_mean = 0.0;
 
     Order order;
     while (time < duration) {
-        current_bias = impact.bias_factor(time);
+        impact.step(time);
+        current_bias = impact.bias_factor();
         model.bias(current_bias);
 
         int64_t dt = model.sample_dt();
@@ -286,13 +284,10 @@ Buffer run_metaorder(OrderBook& lob, QRModel& model, MarketImpact& impact, MetaO
         record.bias = current_bias;
 
         if (order.type == OrderType::Trade) {
-            impact.update(order.side, time);
-            double sign = (order.side == Side::Bid) ? -1.0 : 1.0;
-            sign_sum += sign;
-            trade_count++;
-            current_sign_mean = sign_sum / trade_count;
+						impact.step(order.ts);
+						impact.add_trade(order.side, order.size);
+            //impact.update(order.side, order.ts, order.size);
         }
-        record.trade_sign_mean = current_sign_mean;
         record.source = SOURCE_QR;
 
         buffer.records.push_back(record);
@@ -368,9 +363,6 @@ Buffer run_with_alpha(OrderBook& lob, QRModel& model, MarketImpact& impact, Alph
     Buffer buffer;
     int64_t time = 0;
     int64_t seq = 0;
-    double sign_sum = 0.0;
-    int trade_count = 0;
-    double current_sign_mean = 0.0;
     std::vector<Fill> fills;
 
     while (time < duration) {
@@ -385,7 +377,8 @@ Buffer run_with_alpha(OrderBook& lob, QRModel& model, MarketImpact& impact, Alph
         // Negative alpha because positive alpha should push price UP
         // (positive bias_factor increases bid trades which pushes price DOWN)
         double alpha_val = alpha.value();
-        double impact_val = impact.bias_factor(time);
+        impact.step(time);
+        double impact_val = impact.bias_factor();
         double total_bias = -alpha_val * alpha_scale + impact_val;
         model.bias(total_bias);
 
@@ -396,7 +389,6 @@ Buffer run_with_alpha(OrderBook& lob, QRModel& model, MarketImpact& impact, Alph
         base_record.record_lob(lob);
         base_record.bias = total_bias;
         base_record.alpha = alpha_val;
-        base_record.trade_sign_mean = current_sign_mean;
 
         if (order.type == OrderType::Trade) {
             fills.clear();
@@ -404,13 +396,6 @@ Buffer run_with_alpha(OrderBook& lob, QRModel& model, MarketImpact& impact, Alph
 
             int64_t order_seq = seq++;
             int32_t filled_size = 0;
-
-            // Update impact/sign for this trade
-            impact.update(order.side, time);
-            double sign = (order.side == Side::Bid) ? -1.0 : 1.0;
-            sign_sum += sign;
-            trade_count++;
-            current_sign_mean = sign_sum / trade_count;
 
             // Create a record for each fill (same sequence, same timestamp)
             for (const auto& fill : fills) {
@@ -423,11 +408,15 @@ Buffer run_with_alpha(OrderBook& lob, QRModel& model, MarketImpact& impact, Alph
                 record.volume = fill.size;
                 record.rejected = false;
                 record.partial = false;
-                record.trade_sign_mean = current_sign_mean;
                 record.source = SOURCE_QR;
 
                 filled_size += fill.size;
                 buffer.records.push_back(record);
+            }
+
+            // Update impact with total filled size
+            if (filled_size > 0) {
+                impact.update(order.side, order.ts, filled_size);
             }
 
             // If partial, add a record for the resting limit order (same sequence)
@@ -442,7 +431,6 @@ Buffer run_with_alpha(OrderBook& lob, QRModel& model, MarketImpact& impact, Alph
                 record.volume = order.size - filled_size;
                 record.rejected = false;
                 record.partial = true;
-                record.trade_sign_mean = current_sign_mean;
                 record.source = SOURCE_QR;
 
                 buffer.records.push_back(record);
@@ -466,9 +454,6 @@ Buffer run_with_race(OrderBook& lob, QRModel& model, MarketImpact& impact, Race&
     Buffer buffer;
     int64_t time = 0;
     int64_t seq = 0;
-    double sign_sum = 0.0;
-    int trade_count = 0;
-    double current_sign_mean = 0.0;
     std::vector<Fill> fills;
 
     // RNG for race decisions
@@ -484,7 +469,8 @@ Buffer run_with_race(OrderBook& lob, QRModel& model, MarketImpact& impact, Race&
 
         // Combine alpha + impact bias
         double alpha_val = alpha.value();
-        double impact_val = impact.bias_factor(time);
+        impact.step(time);
+        double impact_val = impact.bias_factor();
         double total_bias = -alpha_val * alpha_scale + impact_val;
         model.bias(total_bias);
 
@@ -500,7 +486,6 @@ Buffer run_with_race(OrderBook& lob, QRModel& model, MarketImpact& impact, Race&
                 base_record.record_lob(lob);
                 base_record.bias = total_bias;
                 base_record.alpha = alpha_val;
-                base_record.trade_sign_mean = current_sign_mean;
 
                 if (racer.type == OrderType::Trade) {
                     fills.clear();
@@ -508,13 +493,6 @@ Buffer run_with_race(OrderBook& lob, QRModel& model, MarketImpact& impact, Race&
 
                     int64_t order_seq = seq++;
                     int32_t filled_size = 0;
-
-                    // Update impact/sign for this trade
-                    impact.update(racer.side, racer.ts);
-                    double sign = (racer.side == Side::Bid) ? -1.0 : 1.0;
-                    sign_sum += sign;
-                    trade_count++;
-                    current_sign_mean = sign_sum / trade_count;
 
                     for (const auto& fill : fills) {
                         EventRecord record = base_record;
@@ -526,11 +504,15 @@ Buffer run_with_race(OrderBook& lob, QRModel& model, MarketImpact& impact, Race&
                         record.volume = fill.size;
                         record.rejected = false;
                         record.partial = false;
-                        record.trade_sign_mean = current_sign_mean;
                         record.source = SOURCE_RACE;
 
                         filled_size += fill.size;
                         buffer.records.push_back(record);
+                    }
+
+                    // Update impact with total filled size
+                    if (filled_size > 0) {
+                        impact.update(racer.side, racer.ts, filled_size);
                     }
 
                     if (racer.partial) {
@@ -543,7 +525,6 @@ Buffer run_with_race(OrderBook& lob, QRModel& model, MarketImpact& impact, Race&
                         record.volume = racer.size - filled_size;
                         record.rejected = false;
                         record.partial = true;
-                        record.trade_sign_mean = current_sign_mean;
                         record.source = SOURCE_RACE;
 
                         buffer.records.push_back(record);
@@ -577,7 +558,6 @@ Buffer run_with_race(OrderBook& lob, QRModel& model, MarketImpact& impact, Race&
         base_record.record_lob(lob);
         base_record.bias = total_bias;
         base_record.alpha = alpha_val;
-        base_record.trade_sign_mean = current_sign_mean;
 
         if (order.type == OrderType::Trade) {
             fills.clear();
@@ -585,12 +565,6 @@ Buffer run_with_race(OrderBook& lob, QRModel& model, MarketImpact& impact, Race&
 
             int64_t order_seq = seq++;
             int32_t filled_size = 0;
-
-            impact.update(order.side, time);
-            double sign = (order.side == Side::Bid) ? -1.0 : 1.0;
-            sign_sum += sign;
-            trade_count++;
-            current_sign_mean = sign_sum / trade_count;
 
             for (const auto& fill : fills) {
                 EventRecord record = base_record;
@@ -602,11 +576,14 @@ Buffer run_with_race(OrderBook& lob, QRModel& model, MarketImpact& impact, Race&
                 record.volume = fill.size;
                 record.rejected = false;
                 record.partial = false;
-                record.trade_sign_mean = current_sign_mean;
                 record.source = SOURCE_QR;
 
                 filled_size += fill.size;
                 buffer.records.push_back(record);
+            }
+
+            if (filled_size > 0) {
+                impact.update(order.side, order.ts, filled_size);
             }
 
             if (order.partial) {
@@ -619,7 +596,6 @@ Buffer run_with_race(OrderBook& lob, QRModel& model, MarketImpact& impact, Race&
                 record.volume = order.size - filled_size;
                 record.rejected = false;
                 record.partial = true;
-                record.trade_sign_mean = current_sign_mean;
                 record.source = SOURCE_QR;
 
                 buffer.records.push_back(record);
@@ -644,13 +620,10 @@ Buffer run_with_race(OrderBook& lob, QRModel& model, MarketImpact& impact, Race&
 // ============================================================================
 Buffer run_simulation(OrderBook& lob, QRModel& model, int64_t duration,
                       Alpha* alpha, MarketImpact* impact,
-                      Race* race, double alpha_scale, double theta) {
+                      Race* race) {
     Buffer buffer;
     int64_t time = 0;
     int64_t seq = 0;
-    double sign_sum = 0.0;
-    int trade_count = 0;
-    double current_sign_mean = 0.0;
     std::vector<Fill> fills;
 
     // RNG for race decisions (only used if race != nullptr)
@@ -675,7 +648,12 @@ Buffer run_simulation(OrderBook& lob, QRModel& model, int64_t duration,
                 EventRecord base_record;
                 base_record.record_lob(lob);
                 base_record.alpha = alpha_val;
-                base_record.trade_sign_mean = current_sign_mean;
+
+                // Update time to racer timestamp
+                time = racer.ts;
+								if (impact) {
+										impact->step(time);
+								}
 
                 if (racer.type == OrderType::Trade) {
                     fills.clear();
@@ -683,17 +661,6 @@ Buffer run_simulation(OrderBook& lob, QRModel& model, int64_t duration,
 
                     int64_t order_seq = seq++;
                     int32_t filled_size = 0;
-
-                    // Update impact/sign for this trade
-                    if (impact && !racer.rejected) {
-                        impact->update(racer.side, racer.ts);
-                    }
-                    if (!racer.rejected) {
-                        double sign = (racer.side == Side::Bid) ? -1.0 : 1.0;
-                        sign_sum += sign;
-                        trade_count++;
-                        current_sign_mean = sign_sum / trade_count;
-                    }
 
                     for (const auto& fill : fills) {
                         EventRecord record = base_record;
@@ -705,11 +672,15 @@ Buffer run_simulation(OrderBook& lob, QRModel& model, int64_t duration,
                         record.volume = fill.size;
                         record.rejected = false;
                         record.partial = false;
-                        record.trade_sign_mean = current_sign_mean;
                         record.source = SOURCE_RACE;
 
                         filled_size += fill.size;
                         buffer.records.push_back(record);
+                    }
+
+                    // Update impact with total filled size
+                    if (impact && filled_size > 0) {
+                        impact->add_trade(racer.side, filled_size);
                     }
 
                     if (racer.rejected) {
@@ -722,7 +693,6 @@ Buffer run_simulation(OrderBook& lob, QRModel& model, int64_t duration,
                         record.volume = racer.size;
                         record.rejected = true;
                         record.partial = false;
-                        record.trade_sign_mean = current_sign_mean;
                         record.source = SOURCE_RACE;
                         buffer.records.push_back(record);
                     }
@@ -737,7 +707,6 @@ Buffer run_simulation(OrderBook& lob, QRModel& model, int64_t duration,
                         record.volume = racer.size - filled_size;
                         record.rejected = false;
                         record.partial = true;
-                        record.trade_sign_mean = current_sign_mean;
                         record.source = SOURCE_RACE;
                         buffer.records.push_back(record);
                     }
@@ -751,9 +720,6 @@ Buffer run_simulation(OrderBook& lob, QRModel& model, int64_t duration,
                     record.source = SOURCE_RACE;
                     buffer.records.push_back(record);
                 }
-
-                // Update time to racer timestamp
-                time = racer.ts;
             }
 
             // Advance alpha for race duration
@@ -762,93 +728,89 @@ Buffer run_simulation(OrderBook& lob, QRModel& model, int64_t duration,
             }
 
             // Consume alpha after race (information acted upon)
-            if (theta > 0.0 && alpha) {
-                alpha->consume(theta);
+            if (alpha && race->alpha_decay() > 0.0) {
+                alpha->consume(race->alpha_decay());
             }
+						
         }
+				
+				else {
+						int64_t dt = model.sample_dt();
+						time += dt;
+						if (time >= duration) break;
 
-        // === QR PATH (always runs after optional race) ===
-        int64_t dt = model.sample_dt();
-        if (alpha) {
-            alpha->step(dt);
-        }
-        time += dt;
+						alpha_val = alpha ? alpha->value() : 0.0;
+						double impact_val = impact ? impact->bias_factor() : 0.0;
+						double total_bias = -alpha_val + impact_val;
+						model.bias(total_bias);
+						Order order = model.sample_order(time);
 
-        if (time >= duration) break;
+						if (alpha) {
+								alpha->step(dt);
+						}
+						if (impact) {
+								impact->step(time);
+						}
 
-        // Set bias with current alpha (after all evolution)
-        alpha_val = alpha ? alpha->value() : 0.0;
-        double impact_val = impact ? impact->bias_factor(time) : 0.0;
-        double total_bias = -alpha_val * alpha_scale + impact_val;
-        model.bias(total_bias);
+						// Capture LOB state before processing
+						EventRecord base_record;
+						base_record.record_lob(lob);
+						base_record.bias = total_bias;
+						base_record.alpha = alpha_val;
 
-        Order order = model.sample_order(time);
+						if (order.type == OrderType::Trade) {
+								fills.clear();
+								lob.process(order, &fills);
 
-        // Capture LOB state before processing
-        EventRecord base_record;
-        base_record.record_lob(lob);
-        base_record.bias = total_bias;
-        base_record.alpha = alpha_val;
-        base_record.trade_sign_mean = current_sign_mean;
+								int64_t order_seq = seq++;
+								int32_t filled_size = 0;
 
-        if (order.type == OrderType::Trade) {
-            fills.clear();
-            lob.process(order, &fills);
+								// Create a record for each fill
+								for (const auto& fill : fills) {
+										EventRecord record = base_record;
+										record.sequence = order_seq;
+										record.timestamp = order.ts;
+										record.type = "Trade";
+										record.side = order.side;
+										record.price = fill.price;
+										record.volume = fill.size;
+										record.rejected = false;
+										record.partial = false;
+										record.source = SOURCE_QR;
 
-            int64_t order_seq = seq++;
-            int32_t filled_size = 0;
+										filled_size += fill.size;
+										buffer.records.push_back(record);
+								}
 
-            // Update impact/sign for this trade
-            if (impact) {
-                impact->update(order.side, time);
-            }
-            double sign = (order.side == Side::Bid) ? -1.0 : 1.0;
-            sign_sum += sign;
-            trade_count++;
-            current_sign_mean = sign_sum / trade_count;
+								// Update impact with total filled size
+								if (impact && filled_size > 0) {
+										impact->add_trade(order.side, filled_size);
+								}
 
-            // Create a record for each fill
-            for (const auto& fill : fills) {
-                EventRecord record = base_record;
-                record.sequence = order_seq;
-                record.timestamp = order.ts;
-                record.type = "Trade";
-                record.side = order.side;
-                record.price = fill.price;
-                record.volume = fill.size;
-                record.rejected = false;
-                record.partial = false;
-                record.trade_sign_mean = current_sign_mean;
-                record.source = SOURCE_QR;
+								// If partial, add a record for the resting limit order
+								if (order.partial) {
+										EventRecord record = base_record;
+										record.sequence = order_seq;
+										record.timestamp = order.ts;
+										record.type = "Add";
+										record.side = (order.side == Side::Bid) ? Side::Ask : Side::Bid;
+										record.price = order.price;
+										record.volume = order.size - filled_size;
+										record.rejected = false;
+										record.partial = true;
+										record.source = SOURCE_QR;
+										buffer.records.push_back(record);
+								}
+						} else {
+								lob.process(order);
 
-                filled_size += fill.size;
-                buffer.records.push_back(record);
-            }
-
-            // If partial, add a record for the resting limit order
-            if (order.partial) {
-                EventRecord record = base_record;
-                record.sequence = order_seq;
-                record.timestamp = order.ts;
-                record.type = "Add";
-                record.side = (order.side == Side::Bid) ? Side::Ask : Side::Bid;
-                record.price = order.price;
-                record.volume = order.size - filled_size;
-                record.rejected = false;
-                record.partial = true;
-                record.trade_sign_mean = current_sign_mean;
-                record.source = SOURCE_QR;
-                buffer.records.push_back(record);
-            }
-        } else {
-            lob.process(order);
-
-            EventRecord record = base_record;
-            record.sequence = seq++;
-            record.record_order(order);
-            record.source = SOURCE_QR;
-            buffer.records.push_back(record);
-        }
+								EventRecord record = base_record;
+								record.sequence = seq++;
+								record.record_order(order);
+								record.source = SOURCE_QR;
+								buffer.records.push_back(record);
+						}
+				}
     }
 
     return buffer;
@@ -865,9 +827,6 @@ std::pair<Buffer, StrategyBuffer> run_aggressive(OrderBook& lob, QRModel& model,
     StrategyBuffer strategy_buffer;
     int64_t time = 0;
     int64_t seq = 0;
-    double sign_sum = 0.0;
-    int trade_count = 0;
-    double current_sign_mean = 0.0;
     std::vector<Fill> fills;
 
     // Cooldown tracking: events since last strategy trade
@@ -914,7 +873,6 @@ std::pair<Buffer, StrategyBuffer> run_aggressive(OrderBook& lob, QRModel& model,
                 EventRecord base_record;
                 base_record.record_lob(lob);
                 base_record.alpha = alpha_val;
-                base_record.trade_sign_mean = current_sign_mean;
 
                 // Determine source: strategy or race
                 int8_t order_source = (racer.order_id == -1) ? SOURCE_STRATEGY : SOURCE_RACE;
@@ -925,14 +883,6 @@ std::pair<Buffer, StrategyBuffer> run_aggressive(OrderBook& lob, QRModel& model,
 
                     int64_t order_seq = seq++;
                     int32_t filled_size = 0;
-
-                    if (!racer.rejected) {
-                        impact.update(racer.side, racer.ts);
-                        double sign = (racer.side == Side::Bid) ? -1.0 : 1.0;
-                        sign_sum += sign;
-                        trade_count++;
-                        current_sign_mean = sign_sum / trade_count;
-                    }
 
                     // If this is the strategy order
                     if (racer.order_id == -1) {
@@ -973,9 +923,13 @@ std::pair<Buffer, StrategyBuffer> run_aggressive(OrderBook& lob, QRModel& model,
                         record.volume = fill.size;
                         record.rejected = false;
                         record.partial = false;
-                        record.trade_sign_mean = current_sign_mean;
                         record.source = order_source;
                         buffer.records.push_back(record);
+                    }
+
+                    // Update impact with total filled size
+                    if (filled_size > 0) {
+                        impact.update(racer.side, racer.ts, filled_size);
                     }
 
                     if (racer.rejected) {
@@ -988,7 +942,6 @@ std::pair<Buffer, StrategyBuffer> run_aggressive(OrderBook& lob, QRModel& model,
                         record.volume = racer.size;
                         record.rejected = true;
                         record.partial = false;
-                        record.trade_sign_mean = current_sign_mean;
                         record.source = order_source;
                         buffer.records.push_back(record);
                     }
@@ -1003,7 +956,6 @@ std::pair<Buffer, StrategyBuffer> run_aggressive(OrderBook& lob, QRModel& model,
                         record.volume = racer.size - filled_size;
                         record.rejected = false;
                         record.partial = true;
-                        record.trade_sign_mean = current_sign_mean;
                         record.source = order_source;
                         buffer.records.push_back(record);
                     }
@@ -1039,7 +991,6 @@ std::pair<Buffer, StrategyBuffer> run_aggressive(OrderBook& lob, QRModel& model,
             EventRecord base_record;
             base_record.record_lob(lob);
             base_record.alpha = alpha_val;
-            base_record.trade_sign_mean = current_sign_mean;
 
             fills.clear();
             lob.process(*strat_order, &fills);
@@ -1050,12 +1001,8 @@ std::pair<Buffer, StrategyBuffer> run_aggressive(OrderBook& lob, QRModel& model,
                 filled_size += fill.size;
             }
 
-            if (!strat_order->rejected) {
-                impact.update(strat_order->side, strat_order->ts);
-                double sign = (strat_order->side == Side::Bid) ? -1.0 : 1.0;
-                sign_sum += sign;
-                trade_count++;
-                current_sign_mean = sign_sum / trade_count;
+            if (filled_size > 0) {
+                impact.update(strat_order->side, strat_order->ts, filled_size);
             }
 
             strategy.on_fill(*strat_order, filled_size, strat_order->rejected);
@@ -1081,7 +1028,6 @@ std::pair<Buffer, StrategyBuffer> run_aggressive(OrderBook& lob, QRModel& model,
                 record.volume = fill.size;
                 record.rejected = false;
                 record.partial = false;
-                record.trade_sign_mean = current_sign_mean;
                 record.source = SOURCE_STRATEGY;
                 buffer.records.push_back(record);
             }
@@ -1096,7 +1042,6 @@ std::pair<Buffer, StrategyBuffer> run_aggressive(OrderBook& lob, QRModel& model,
                 record.volume = strat_order->size;
                 record.rejected = true;
                 record.partial = false;
-                record.trade_sign_mean = current_sign_mean;
                 record.source = SOURCE_STRATEGY;
                 buffer.records.push_back(record);
             }
@@ -1120,7 +1065,8 @@ std::pair<Buffer, StrategyBuffer> run_aggressive(OrderBook& lob, QRModel& model,
 
         // Set bias with current alpha (after all evolution)
         alpha_val = alpha.value();
-        double impact_val = impact.bias_factor(time);
+        impact.step(time);
+        double impact_val = impact.bias_factor();
         double total_bias = -alpha_val * alpha_scale + impact_val;
         model.bias(total_bias);
 
@@ -1131,7 +1077,6 @@ std::pair<Buffer, StrategyBuffer> run_aggressive(OrderBook& lob, QRModel& model,
         base_record.record_lob(lob);
         base_record.bias = total_bias;
         base_record.alpha = alpha_val;
-        base_record.trade_sign_mean = current_sign_mean;
 
         if (order.type == OrderType::Trade) {
             fills.clear();
@@ -1139,12 +1084,6 @@ std::pair<Buffer, StrategyBuffer> run_aggressive(OrderBook& lob, QRModel& model,
 
             int64_t order_seq = seq++;
             int32_t filled_size = 0;
-
-            impact.update(order.side, time);
-            double sign = (order.side == Side::Bid) ? -1.0 : 1.0;
-            sign_sum += sign;
-            trade_count++;
-            current_sign_mean = sign_sum / trade_count;
 
             for (const auto& fill : fills) {
                 EventRecord record = base_record;
@@ -1156,11 +1095,14 @@ std::pair<Buffer, StrategyBuffer> run_aggressive(OrderBook& lob, QRModel& model,
                 record.volume = fill.size;
                 record.rejected = false;
                 record.partial = false;
-                record.trade_sign_mean = current_sign_mean;
                 record.source = SOURCE_QR;
 
                 filled_size += fill.size;
                 buffer.records.push_back(record);
+            }
+
+            if (filled_size > 0) {
+                impact.update(order.side, order.ts, filled_size);
             }
 
             if (order.partial) {
@@ -1173,7 +1115,6 @@ std::pair<Buffer, StrategyBuffer> run_aggressive(OrderBook& lob, QRModel& model,
                 record.volume = order.size - filled_size;
                 record.rejected = false;
                 record.partial = true;
-                record.trade_sign_mean = current_sign_mean;
                 record.source = SOURCE_QR;
                 buffer.records.push_back(record);
             }
@@ -1199,6 +1140,199 @@ std::pair<Buffer, StrategyBuffer> run_aggressive(OrderBook& lob, QRModel& model,
     }
 
     return {buffer, strategy_buffer};
+}
+
+// ============================================================================
+// HFT Alpha simulation: races without forced QR events after each race
+// Alpha fades naturally through imbalance mechanism
+// ============================================================================
+Buffer run_hft_alpha(OrderBook& lob, QRModel& model, int64_t duration,
+                     Alpha& alpha, Race& race, double w_ou,
+                     double w_imb, double alpha_scale,
+                     MarketImpact* impact) {
+    Buffer buffer;
+    int64_t time = 0;
+    int64_t seq = 0;
+    std::vector<Fill> fills;
+
+    // RNG for race decisions
+    std::mt19937_64 race_rng(std::random_device{}());
+
+    while (time < duration) {
+        // Sample dt and advance alpha process
+        int64_t dt = model.sample_dt();
+        alpha.step(dt);
+        time += dt;
+
+        if (time >= duration) break;
+
+        // Combined alpha signal: w_ou * X_ou + w_imb * imbalance
+        double alpha_val = w_ou * alpha.value() + w_imb * lob.imbalance();
+
+        // Set bias with current alpha + optional impact
+        if (impact) impact->step(time);
+        double impact_val = impact ? impact->bias_factor() : 0.0;
+        double total_bias = -alpha_val * alpha_scale + impact_val;
+        model.bias(total_bias);
+
+        // Check if race should trigger
+        if (race.should_race(alpha_val, race_rng)) {
+            // === RACE PATH ===
+            int64_t race_start = time;
+
+            // Generate racing orders with timestamps
+            std::vector<Order> racers = race.generate_racer_orders(
+                alpha_val, lob.best_bid(), lob.best_ask(), race_rng);
+            race.assign_timestamps(racers, race_start, race_rng);
+
+            // Process each racer
+            for (auto& racer : racers) {
+                EventRecord base_record;
+                base_record.record_lob(lob);
+                base_record.bias = total_bias;
+                base_record.alpha = alpha_val;
+
+                if (racer.type == OrderType::Trade) {
+                    fills.clear();
+                    lob.process(racer, &fills);
+
+                    int64_t order_seq = seq++;
+                    int32_t filled_size = 0;
+
+                    for (const auto& fill : fills) {
+                        EventRecord record = base_record;
+                        record.sequence = order_seq;
+                        record.timestamp = racer.ts;
+                        record.type = "Trade";
+                        record.side = racer.side;
+                        record.price = fill.price;
+                        record.volume = fill.size;
+                        record.rejected = false;
+                        record.partial = false;
+                        record.source = SOURCE_RACE;
+
+                        filled_size += fill.size;
+                        buffer.records.push_back(record);
+                    }
+
+                    // Update impact with total filled size
+                    if (impact && filled_size > 0) {
+                        impact->update(racer.side, racer.ts, filled_size);
+                    }
+
+                    if (racer.rejected) {
+                        EventRecord record = base_record;
+                        record.sequence = order_seq;
+                        record.timestamp = racer.ts;
+                        record.type = "Trade";
+                        record.side = racer.side;
+                        record.price = racer.price;
+                        record.volume = racer.size;
+                        record.rejected = true;
+                        record.partial = false;
+                        record.source = SOURCE_RACE;
+                        buffer.records.push_back(record);
+                    }
+
+                    if (racer.partial) {
+                        EventRecord record = base_record;
+                        record.sequence = order_seq;
+                        record.timestamp = racer.ts;
+                        record.type = "Add";
+                        record.side = (racer.side == Side::Bid) ? Side::Ask : Side::Bid;
+                        record.price = racer.price;
+                        record.volume = racer.size - filled_size;
+                        record.rejected = false;
+                        record.partial = true;
+                        record.source = SOURCE_RACE;
+                        buffer.records.push_back(record);
+                    }
+                } else {
+                    // Cancel or Add order
+                    lob.process(racer);
+
+                    EventRecord record = base_record;
+                    record.sequence = seq++;
+                    record.record_order(racer);
+                    record.source = SOURCE_RACE;
+                    buffer.records.push_back(record);
+                }
+
+                // Update time to racer timestamp
+                time = racer.ts;
+            }
+
+            // Advance alpha for race duration
+            alpha.step(time - race_start);
+
+            // No forced QR event after race - just continue to next iteration
+            continue;
+        }
+
+        // === QR PATH (no race triggered) ===
+        Order order = model.sample_order(time);
+
+        // Capture LOB state before processing
+        EventRecord base_record;
+        base_record.record_lob(lob);
+        base_record.bias = total_bias;
+        base_record.alpha = alpha_val;
+
+        if (order.type == OrderType::Trade) {
+            fills.clear();
+            lob.process(order, &fills);
+
+            int64_t order_seq = seq++;
+            int32_t filled_size = 0;
+
+            // Create a record for each fill
+            for (const auto& fill : fills) {
+                EventRecord record = base_record;
+                record.sequence = order_seq;
+                record.timestamp = order.ts;
+                record.type = "Trade";
+                record.side = order.side;
+                record.price = fill.price;
+                record.volume = fill.size;
+                record.rejected = false;
+                record.partial = false;
+                record.source = SOURCE_QR;
+
+                filled_size += fill.size;
+                buffer.records.push_back(record);
+            }
+
+            // Update impact with total filled size
+            if (impact && filled_size > 0) {
+                impact->update(order.side, time, filled_size);
+            }
+
+            // If partial, add a record for the resting limit order
+            if (order.partial) {
+                EventRecord record = base_record;
+                record.sequence = order_seq;
+                record.timestamp = order.ts;
+                record.type = "Add";
+                record.side = (order.side == Side::Bid) ? Side::Ask : Side::Bid;
+                record.price = order.price;
+                record.volume = order.size - filled_size;
+                record.rejected = false;
+                record.partial = true;
+                record.source = SOURCE_QR;
+                buffer.records.push_back(record);
+            }
+        } else {
+            lob.process(order);
+
+            EventRecord record = base_record;
+            record.sequence = seq++;
+            record.record_order(order);
+            record.source = SOURCE_QR;
+            buffer.records.push_back(record);
+        }
+    }
+
+    return buffer;
 }
 
 }

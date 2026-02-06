@@ -99,7 +99,6 @@ struct Accumulator {
     std::vector<double> mid_sum_sq;
     std::vector<double> bias_sum;
     std::vector<double> bias_sum_sq;
-    std::vector<double> sign_mean_sum;
     // Trade prob sums per bin: [bin][grid_point]
     std::array<std::vector<double>, QRParams::NUM_IMB_BINS> bid_trade_prob_sum;
     std::array<std::vector<double>, QRParams::NUM_IMB_BINS> ask_trade_prob_sum;
@@ -114,7 +113,6 @@ struct Accumulator {
             mid_sum_sq.push_back(0.0);
             bias_sum.push_back(0.0);
             bias_sum_sq.push_back(0.0);
-            sign_mean_sum.push_back(0.0);
         }
         for (int bin = 0; bin < QRParams::NUM_IMB_BINS; bin++) {
             bid_trade_prob_sum[bin].resize(grid.size(), 0.0);
@@ -130,7 +128,6 @@ struct Accumulator {
 
         std::vector<double> proj_mid(grid.size(), 0.0);
         std::vector<double> proj_bias(grid.size(), 0.0);
-        std::vector<double> proj_sign_mean(grid.size(), 0.0);
         std::array<std::vector<double>, QRParams::NUM_IMB_BINS> proj_bid_prob;
         std::array<std::vector<double>, QRParams::NUM_IMB_BINS> proj_ask_prob;
         for (int bin = 0; bin < QRParams::NUM_IMB_BINS; bin++) {
@@ -154,7 +151,6 @@ struct Accumulator {
                               buffer.records[j].best_ask_price) / 2.0;
                 proj_mid[i] = mid - mid0;
                 proj_bias[i] = buffer.records[j].bias;
-                proj_sign_mean[i] = buffer.records[j].trade_sign_mean;
             }
             if (k < prob_records.size()) {
                 for (int bin = 0; bin < QRParams::NUM_IMB_BINS; bin++) {
@@ -170,7 +166,6 @@ struct Accumulator {
             mid_sum_sq[i] += proj_mid[i] * proj_mid[i];
             bias_sum[i] += proj_bias[i];
             bias_sum_sq[i] += proj_bias[i] * proj_bias[i];
-            sign_mean_sum[i] += proj_sign_mean[i];
             for (int bin = 0; bin < QRParams::NUM_IMB_BINS; bin++) {
                 bid_trade_prob_sum[bin][i] += proj_bid_prob[bin][i];
                 ask_trade_prob_sum[bin][i] += proj_ask_prob[bin][i];
@@ -181,7 +176,7 @@ struct Accumulator {
 
     void save_csv(const std::string& path) {
         std::ofstream file(path);
-        file << "timestamp,avg_mid_price_change,mid_price_change_se,avg_bias,bias_se,avg_trade_sign_mean";
+        file << "timestamp,avg_mid_price_change,mid_price_change_se,avg_bias,bias_se";
         for (int bin = 0; bin < QRParams::NUM_IMB_BINS; bin++) {
             file << ",bin_" << bin << "_bid_trade_prob,bin_" << bin << "_ask_trade_prob";
         }
@@ -195,7 +190,7 @@ struct Accumulator {
             double bias_var = bias_sum_sq[i] / count - bias_mean * bias_mean;
             double bias_se = std::sqrt(bias_var / count);
 
-            file << grid[i] << "," << mid_mean << "," << mid_se << "," << bias_mean << "," << bias_se << "," << (sign_mean_sum[i] / count);
+            file << grid[i] << "," << mid_mean << "," << mid_se << "," << bias_mean << "," << bias_se;
             for (int bin = 0; bin < QRParams::NUM_IMB_BINS; bin++) {
                 file << "," << (bid_trade_prob_sum[bin][i] / count) << "," << (ask_trade_prob_sum[bin][i] / count);
             }
@@ -205,17 +200,16 @@ struct Accumulator {
 };
 
 // Constants
-constexpr int32_t MAX_ORDER_SIZE = 5;
 constexpr int64_t METAORDER_DURATION_NS = 5LL * 60 * 1'000'000'000;  // 5 minutes in nanoseconds
 
-// Build metaorder: total_vol spread over 5 minutes, max size per order = 5
+// Build metaorder: total_vol spread over 5 minutes
 // First order at t=0, last order at t=5min
-MetaOrder build_metaorder(int32_t total_vol, Side side) {
+MetaOrder build_metaorder(int32_t total_vol, Side side, int32_t max_order_size) {
     MetaOrder metaorder;
     metaorder.side = side;
 
     // Calculate number of orders needed (ceil division)
-    int num_orders = (total_vol + MAX_ORDER_SIZE - 1) / MAX_ORDER_SIZE;
+    int num_orders = (total_vol + max_order_size - 1) / max_order_size;
     if (num_orders == 0) num_orders = 1;
 
     // Time interval between orders (so last order lands at exactly 5 min)
@@ -225,7 +219,7 @@ MetaOrder build_metaorder(int32_t total_vol, Side side) {
     int32_t remaining = total_vol;
     for (int i = 0; i < num_orders; i++) {
         int64_t t = static_cast<int64_t>(i) * interval;
-        int32_t size = std::min(remaining, MAX_ORDER_SIZE);
+        int32_t size = std::min(remaining, max_order_size);
         metaorder.timestamps.push_back(t);
         metaorder.sizes.push_back(size);
         remaining -= size;
@@ -237,9 +231,10 @@ MetaOrder build_metaorder(int32_t total_vol, Side side) {
 void run_and_accumulate(const std::string& data_path, const QueueDistributions& dists,
                         const DeltaT* delta_t, const TradeIndices& trd_idx,
                         const std::vector<LOBConfig>& lob_configs,
-                        double ema_alpha, double ema_m, bool no_impact,
+                        double alpha, double impact_m, bool no_impact,
+                        bool use_time_decay, double half_life_sec,
                         uint64_t seed, int64_t duration, int32_t metaorder_vol,
-                        bool use_total_lvl, Accumulator& acc) {
+                        int32_t max_order_size, bool use_total_lvl, Accumulator& acc) {
     // Pick random LOB config based on seed
     std::mt19937_64 rng(seed);
     size_t config_idx = rng() % lob_configs.size();
@@ -271,13 +266,15 @@ void run_and_accumulate(const std::string& data_path, const QueueDistributions& 
     std::unique_ptr<MarketImpact> impact_ptr;
     if (no_impact) {
         impact_ptr = std::make_unique<NoImpact>();
+    } else if (use_time_decay) {
+        impact_ptr = std::make_unique<TimeDecayImpact>(half_life_sec, impact_m);
     } else {
-        impact_ptr = std::make_unique<EMAImpact>(ema_alpha, ema_m);
+        impact_ptr = std::make_unique<EMAImpact>(alpha, impact_m);
     }
     MarketImpact& impact = *impact_ptr;
 
     // Build metaorder based on volume
-    MetaOrder metaorder = build_metaorder(metaorder_vol, Side::Ask);
+    MetaOrder metaorder = build_metaorder(metaorder_vol, Side::Ask, max_order_size);
 
     // Inline run_metaorder to capture trade probs
     Buffer buffer;
@@ -286,13 +283,11 @@ void run_and_accumulate(const std::string& data_path, const QueueDistributions& 
     size_t meta_i = 0;
     size_t meta_n = metaorder.timestamps.size();
     double current_bias = 0.0;
-    double sign_sum = 0.0;
-    int trade_count = 0;
-    double current_sign_mean = 0.0;
-
     Order order;
     while (time < duration) {
-        current_bias = impact.bias_factor(time);
+        // Step impact to current time (decays phi for TimeDecayImpact)
+        impact.step(time);
+        current_bias = impact.bias_factor();
         model.bias(current_bias);
 
         // Capture trade probs for all bins after bias is applied
@@ -309,7 +304,10 @@ void run_and_accumulate(const std::string& data_path, const QueueDistributions& 
         int64_t dt = model.sample_dt();
         if (meta_i < meta_n && time + dt >= metaorder.timestamps[meta_i]) {
             time = metaorder.timestamps[meta_i];
-            int32_t price = (metaorder.side == Side::Bid) ? lob.best_bid() : lob.best_ask();
+            // Marketable limit order that walks the book (crosses spread aggressively)
+            int32_t price = (metaorder.side == Side::Bid)
+                ? std::max(1, lob.best_bid() - 4)
+                : lob.best_ask() + 4;
             order = Order(OrderType::Trade, metaorder.side, price, metaorder.sizes[meta_i], time);
             meta_i++;
         }
@@ -325,13 +323,8 @@ void run_and_accumulate(const std::string& data_path, const QueueDistributions& 
         record.bias = current_bias;
 
         if (order.type == OrderType::Trade) {
-            impact.update(order.side, time);
-            double sign = (order.side == Side::Bid) ? -1.0 : 1.0;
-            sign_sum += sign;
-            trade_count++;
-            current_sign_mean = sign_sum / trade_count;
+            impact.update(order.side, order.ts, order.size);
         }
-        record.trade_sign_mean = current_sign_mean;
 
         buffer.records.push_back(record);
     }
@@ -344,11 +337,15 @@ int main(int argc, char* argv[]) {
         std::cout << "Usage: " << argv[0] << " <ticker> [options]\n";
         std::cout << "Options:\n";
         std::cout << "  --mix              Use mixture delta_t distribution\n";
-        std::cout << "  --alpha <val>      EMA impact alpha (default: 0.005)\n";
-        std::cout << "  --m <val>          EMA impact multiplier (default: 4.5)\n";
+        std::cout << "  --alpha <val>      Smoothing factor for impact model (default: 0.005)\n";
+        std::cout << "  --m <val>          Impact multiplier (default: 4.5)\n";
+        std::cout << "  --time-decay       Use time-based decay impact (instead of EMA)\n";
+        std::cout << "  --half-life <sec>  Half-life for time-decay in seconds (default: 300)\n";
         std::cout << "  --duration <min>   Simulation duration in minutes (default: 30)\n";
         std::cout << "  --hourly-vol <val> Hourly volume baseline (default: 1000)\n";
-        std::cout << "  --no-impact        Disable EMA impact model\n";
+        std::cout << "  --max-size <val>   Max order size for metaorder (default: 2)\n";
+        std::cout << "  --num-sims <val>   Number of simulations (default: 100000)\n";
+        std::cout << "  --no-impact        Disable impact model\n";
         std::cout << "  --use-total-lvl    Use 3D event probabilities (imb, spread, total_lvl)\n";
         std::cout << "  -h, --help         Show this help message\n";
     };
@@ -368,12 +365,16 @@ int main(int argc, char* argv[]) {
     std::string data_path = base_path + "/" + ticker;
     std::string base_results_path = base_path + "/results/" + ticker;
 
-    // Parse flags: --mix, --alpha, --m, --duration, --hourly-vol, --use-total-lvl
+    // Parse flags
     bool use_mixture = false;
-    double ema_alpha = 0.005;
-    double ema_m = 4.5;
+    double alpha = 0.005;  // smoothing factor for both EMA and TimeDecay
+    double impact_m = 4.5;
+    bool use_time_decay = false;
+    double half_life_sec = 300.0;
     int duration_min = 30;
     int32_t hourly_vol = 1000;
+    int32_t max_order_size = 2;
+    int num_sims = 100'000;
     bool use_total_lvl = false;
     bool no_impact = false;
     for (int i = 2; i < argc; ++i) {
@@ -381,13 +382,21 @@ int main(int argc, char* argv[]) {
         if (arg == "--mix") {
             use_mixture = true;
         } else if (arg == "--alpha" && i + 1 < argc) {
-            ema_alpha = std::stod(argv[++i]);
+            alpha = std::stod(argv[++i]);
         } else if (arg == "--m" && i + 1 < argc) {
-            ema_m = std::stod(argv[++i]);
+            impact_m = std::stod(argv[++i]);
+        } else if (arg == "--time-decay") {
+            use_time_decay = true;
+        } else if (arg == "--half-life" && i + 1 < argc) {
+            half_life_sec = std::stod(argv[++i]);
         } else if (arg == "--duration" && i + 1 < argc) {
             duration_min = std::stoi(argv[++i]);
         } else if (arg == "--hourly-vol" && i + 1 < argc) {
             hourly_vol = std::stoi(argv[++i]);
+        } else if (arg == "--max-size" && i + 1 < argc) {
+            max_order_size = std::stoi(argv[++i]);
+        } else if (arg == "--num-sims" && i + 1 < argc) {
+            num_sims = std::stoi(argv[++i]);
         } else if (arg == "--no-impact") {
             no_impact = true;
         } else if (arg == "--use-total-lvl") {
@@ -421,27 +430,34 @@ int main(int argc, char* argv[]) {
     trd_idx.compute(params_for_idx);
     std::cout << "Computed trade indices\n";
 
-    int num_sims = 100'000;
-    //int num_sims = 1;
     int num_threads = std::thread::hardware_concurrency();
 
     int64_t duration = static_cast<int64_t>(duration_min) * 60 * 1'000'000'000;
     int64_t step = 500'000'000;  // 500ms grid
 
     std::cout << "Using " << num_threads << " threads\n";
-    std::cout << "Impact: " << (no_impact ? "off" : "EMA alpha=" + std::to_string(ema_alpha) + ", m=" + std::to_string(ema_m)) << "\n";
+    std::string impact_str;
+    if (no_impact) {
+        impact_str = "off";
+    } else if (use_time_decay) {
+        impact_str = "TimeDecay half_life=" + std::to_string(half_life_sec) + "s, m=" + std::to_string(impact_m);
+    } else {
+        impact_str = "EMA alpha=" + std::to_string(alpha) + ", m=" + std::to_string(impact_m);
+    }
+    std::cout << "Impact: " << impact_str << "\n";
     std::cout << "Hourly vol: " << hourly_vol << "\n";
+    std::cout << "Max order size: " << max_order_size << "\n";
     std::cout << "Total lvl: " << (use_total_lvl ? "on" : "off") << "\n";
     std::cout << "Grid: " << (duration / step + 1) << " points (500ms spacing)\n";
     std::cout << "Duration: " << duration_min << " minutes, Metaorder execution: 5 minutes\n";
 
     std::filesystem::create_directories(base_results_path);
 
-    // Metaorder sizes: 2.5%, 5%, 10% of hourly_vol
+    // Metaorder sizes: 10%, 5%, 2.5% of hourly_vol
     std::vector<std::pair<double, int32_t>> metaorder_configs = {
-        {2.5, static_cast<int32_t>(hourly_vol * 0.025)},
+        {10.0, static_cast<int32_t>(hourly_vol * 0.10)},
         {5.0, static_cast<int32_t>(hourly_vol * 0.05)},
-        {10.0, static_cast<int32_t>(hourly_vol * 0.10)}
+        {2.5, static_cast<int32_t>(hourly_vol * 0.025)}
     };
 
     auto total_start = std::chrono::high_resolution_clock::now();
@@ -449,7 +465,7 @@ int main(int argc, char* argv[]) {
     for (const auto& [pct, metaorder_vol] : metaorder_configs) {
         std::cout << "\n=== Running metaorder " << pct << "% of hourly vol (" << metaorder_vol << " shares) ===\n";
 
-        MetaOrder sample_meta = build_metaorder(metaorder_vol, Side::Ask);
+        MetaOrder sample_meta = build_metaorder(metaorder_vol, Side::Ask, max_order_size);
         std::cout << "  Orders: " << sample_meta.timestamps.size()
                   << ", sizes: ";
         for (size_t i = 0; i < std::min(sample_meta.sizes.size(), size_t(5)); i++) {
@@ -470,7 +486,8 @@ int main(int argc, char* argv[]) {
             for (int i = batch_start; i < batch_end; i++) {
                 futures.push_back(std::async(std::launch::async, run_and_accumulate,
                                               data_path, std::cref(dists), delta_t, std::cref(trd_idx), std::cref(lob_configs),
-                                              ema_alpha, ema_m, no_impact, i, duration, metaorder_vol, use_total_lvl, std::ref(acc)));
+                                              alpha, impact_m, no_impact, use_time_decay, half_life_sec,
+                                              i, duration, metaorder_vol, max_order_size, use_total_lvl, std::ref(acc)));
             }
 
             for (auto& f : futures) {
@@ -488,9 +505,12 @@ int main(int argc, char* argv[]) {
         if (no_impact) {
             oss << base_results_path << "/no_impact_pct_" << static_cast<int>(pct * 10)
                 << dt_suffix << total_lvl_suffix << ".csv";
+        } else if (use_time_decay) {
+            oss << base_results_path << "/timedecay_impact_pct_" << static_cast<int>(pct * 10)
+                << "_hl" << half_life_sec << "_m" << impact_m << dt_suffix << total_lvl_suffix << ".csv";
         } else {
             oss << base_results_path << "/ema_impact_pct_" << static_cast<int>(pct * 10)
-                << "_a" << ema_alpha << "_m" << ema_m << dt_suffix << total_lvl_suffix << ".csv";
+                << "_a" << alpha << "_m" << impact_m << dt_suffix << total_lvl_suffix << ".csv";
         }
         std::string out_path = oss.str();
         acc.save_csv(out_path);

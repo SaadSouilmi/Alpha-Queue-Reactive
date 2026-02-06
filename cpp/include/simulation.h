@@ -42,7 +42,6 @@ namespace qr {
         bool partial;
         double bias;
         double alpha;
-        double trade_sign_mean;
         int8_t source;  // SOURCE_QR=0, SOURCE_RACE=1, SOURCE_STRATEGY=2
 
         void record_lob(const OrderBook& lob) {
@@ -89,7 +88,14 @@ namespace qr {
     // Unified simulation function (replaces run_simple, run_with_alpha, run_with_race)
     Buffer run_simulation(OrderBook& lob, QRModel& model, int64_t duration,
                           Alpha* alpha = nullptr, MarketImpact* impact = nullptr,
-                          Race* race = nullptr, double alpha_scale = 1.0, double theta = 0.0);
+                          Race* race = nullptr);
+
+    // HFT alpha simulation: races occur naturally without forcing QR events after each race
+    // Alpha signal = w_ou * X_ou + w_imb * imbalance
+    Buffer run_hft_alpha(OrderBook& lob, QRModel& model, int64_t duration,
+                         Alpha& alpha, Race& race, double w_ou = 1.0,
+                         double w_imb = 0.0, double alpha_scale = 1.0,
+                         MarketImpact* impact = nullptr);
 
     // Strategy simulation (Race* = nullptr for no-race)
     std::pair<Buffer, StrategyBuffer> run_aggressive(OrderBook& lob, QRModel& model,
