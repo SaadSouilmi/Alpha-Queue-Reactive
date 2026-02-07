@@ -215,6 +215,27 @@ def preprocess(
     df = compute_imbalance(df, bins)
     df = compute_total_best_bin(df, quantiles=total_best_quantiles)
     df = df.with_columns(delta_t=pl.col("ts_event").diff().cast(int))
+
+    # True add in spread sizes
+    df = df.with_columns(
+        is_create=pl.col("event").is_in(["Create_Bid", "Create_Ask"]),
+        not_add=~pl.col("event").is_in(["Add", "Create_Bid", "Create_Ask"]),
+        price_changed=pl.col("price").ne(pl.col("price").shift(1)),
+    )
+    df = df.with_columns(
+        (pl.col("is_create") | pl.col("price_changed") | pl.col("not_add"))
+        .cum_sum()
+        .alias("group_id")
+    )
+    df = df.with_columns(
+        event_size=pl.when(pl.col("is_create"))
+        .then(pl.col("event_size").sum().over("group_id"))
+        .otherwise(pl.col("event_size")),
+        is_followup_add=pl.col("event").eq("Add")
+        & pl.col("is_create").any().over("group_id"),
+    )
+    df = df.filter(~pl.col("is_followup_add"))
+
     df = df.with_columns(
         event_size=pl.when(pl.col("event_q").abs().eq(1))
         .then(pl.col("event_size").truediv(median_event_sizes[1]).ceil().cast(int))
@@ -230,7 +251,11 @@ def preprocess(
             "symbol",
             "event_queue_size",
             "event_queue_nbr",
-            "price",
+            "is_create",
+            "not_add",
+            "price_changed",
+            "group_id",
+            "is_followup_add",
         )
     ).rename(
         {

@@ -53,14 +53,16 @@ def search(ticker: str, **query) -> pd.DataFrame:
         config = entry.get("config", {})
         if _match(config, query):
             parquet_path = results_dir / f"{hash_id}.parquet"
-            rows.append({
-                "hash": hash_id,
-                "file": str(parquet_path),
-                "exists": parquet_path.exists(),
-                "seed_used": entry.get("seed_used"),
-                "timestamp": entry.get("timestamp"),
-                **_flatten(config),
-            })
+            rows.append(
+                {
+                    "hash": hash_id,
+                    "file": str(parquet_path),
+                    "exists": parquet_path.exists(),
+                    "seed_used": entry.get("seed_used"),
+                    "timestamp": entry.get("timestamp"),
+                    **_flatten(config),
+                }
+            )
 
     return pd.DataFrame(rows)
 
