@@ -9,30 +9,50 @@ namespace qr {
 namespace {
     OrderType parse_event_type(const std::string& s) {
         if (s == "Add") return OrderType::Add;
-        if (s == "Can") return OrderType::Cancel;
-        if (s == "Trd") return OrderType::Trade;
+        if (s == "Cancel") return OrderType::Cancel;
+        if (s == "Trade") return OrderType::Trade;
         if (s == "Create_Bid") return OrderType::CreateBid;
         if (s == "Create_Ask") return OrderType::CreateAsk;
         throw std::runtime_error("Unknown event type: " + s);
     }
 
     Side parse_side(const std::string& s) {
-        if (s == "A") return Side::Ask;
-        if (s == "B") return Side::Bid;
+        if (s == "1") return Side::Ask;
+        if (s == "-1") return Side::Bid;
         throw std::runtime_error("Unknown side: " + s);
     }
 
-    // Convert imb_bin float value (-1.0, -0.9, ..., 0.0, ..., 0.9, 1.0) to index (0-20)
-    int imb_bin_to_index(double imb_bin) {
-        // imb_bin: -1.0 -> 0, -0.9 -> 1, ..., 0.0 -> 10, ..., 0.9 -> 19, 1.0 -> 20
-        int idx = static_cast<int>(std::round(imb_bin * 10.0)) + 10;
-        return std::clamp(idx, 0, 20);
+    OrderType flip_event_type(OrderType t) {
+        if (t == OrderType::CreateBid) return OrderType::CreateAsk;
+        if (t == OrderType::CreateAsk) return OrderType::CreateBid;
+        return t;
+    }
+
+    Side flip_side(Side s) {
+        return (s == Side::Bid) ? Side::Ask : Side::Bid;
+    }
+
+    // CSV has symmetric imbalance 0.0-1.0 -> index 10-20
+    int imb_bin_to_index(double imb_val) {
+        int idx = static_cast<int>(std::round(imb_val * 10.0)) + 10;
+        return std::clamp(idx, 10, 20);
+    }
+
+    // Mirror index: 13 (imb=0.3) -> 7 (imb=-0.3)
+    int mirror_imb_index(int idx) {
+        return 20 - idx;
+    }
+
+    // Signed queue to 4-slot index: {-2→0, -1→1, 1→2, 2→3}
+    int q4_idx(int q) {
+        switch (q) { case -2: return 0; case -1: return 1; case 1: return 2; case 2: return 3; }
+        return 1;
     }
 }
 
 QRParams::QRParams(const std::string& path) {
     // Load event probabilities
-    // Format: imb_bin,spread,event,event_q,len,event_side,proba
+    // Format: imbalance,spread,event,queue,side,probability
     std::ifstream file(path + "/event_probabilities.csv");
     if (!file.is_open()) {
         throw std::runtime_error("Cannot open event_probabilities.csv");
@@ -45,10 +65,10 @@ QRParams::QRParams(const std::string& path) {
         std::istringstream ss(line);
         std::string token;
 
-        // imb_bin (float like -1.0, -0.9, 0.0, etc.)
+        // imbalance (0.0 to 1.0)
         std::getline(ss, token, ',');
-        double imb_bin_val = std::stod(token);
-        int imb_bin = imb_bin_to_index(imb_bin_val);
+        double imb_val = std::stod(token);
+        int imb_idx = imb_bin_to_index(imb_val);
 
         // spread (1 or 2)
         std::getline(ss, token, ',');
@@ -58,33 +78,38 @@ QRParams::QRParams(const std::string& path) {
         std::getline(ss, token, ',');
         OrderType type = parse_event_type(token);
 
-        // event_q (queue number)
+        // queue
         std::getline(ss, token, ',');
         int queue_nbr = std::stoi(token);
 
-        // len (skip - just count)
-        std::getline(ss, token, ',');
-
-        // event_side
+        // side (1 or -1)
         std::getline(ss, token, ',');
         Side side = parse_side(token);
 
-        // proba
+        // probability
         std::getline(ss, token, ',');
         double prob = std::stod(token);
 
-        // Add to state params
-        StateParams& sp = state_params[imb_bin][spread];
+        // Store at positive index
+        StateParams& sp = state_params[imb_idx][spread];
         sp.events.push_back({type, side, queue_nbr});
         sp.base_probs.push_back(prob);
+
+        // Mirror to negative index (skip imbalance=0.0 which is idx 10)
+        if (imb_idx != 10) {
+            int neg_idx = mirror_imb_index(imb_idx);
+            StateParams& sp_neg = state_params[neg_idx][spread];
+            sp_neg.events.push_back({flip_event_type(type), flip_side(side), -queue_nbr});
+            sp_neg.base_probs.push_back(prob);
+        }
     }
     file.close();
 
     // Load intensities
-    // Format: imb_bin,spread,dt (dt is mean inter-arrival time, so lambda = 1/dt)
-    std::ifstream ifile(path + "/intensities.csv");
+    // Format: imbalance,spread,average_dt
+    std::ifstream ifile(path + "/delta_t_exponential.csv");
     if (!ifile.is_open()) {
-        throw std::runtime_error("Cannot open intensities.csv");
+        throw std::runtime_error("Cannot open delta_t_exponential.csv");
     }
 
     std::getline(ifile, line); // skip header
@@ -93,21 +118,26 @@ QRParams::QRParams(const std::string& path) {
         std::istringstream ss(line);
         std::string token;
 
-        // imb_bin (float)
+        // imbalance (0.0 to 1.0)
         std::getline(ss, token, ',');
-        double imb_bin_val = std::stod(token);
-        int imb_bin = imb_bin_to_index(imb_bin_val);
+        double imb_val = std::stod(token);
+        int imb_idx = imb_bin_to_index(imb_val);
 
         // spread (1 or 2)
         std::getline(ss, token, ',');
         int spread = std::stoi(token) - 1; // 1->0, 2->1
 
-        // dt (mean inter-arrival time)
+        // average_dt (mean inter-arrival time)
         std::getline(ss, token, ',');
         double dt_mean = std::stod(token);
 
-        // Store rate (1/mean) for exponential distribution
-        state_params[imb_bin][spread].lambda = 1.0 / dt_mean;
+        double lambda = 1.0 / dt_mean;
+        state_params[imb_idx][spread].lambda = lambda;
+
+        // Mirror to negative index (lambda is symmetric)
+        if (imb_idx != 10) {
+            state_params[mirror_imb_index(imb_idx)][spread].lambda = lambda;
+        }
     }
     ifile.close();
 
@@ -254,7 +284,7 @@ void QRParams::load_event_probabilities_3d(const std::string& csv_path) {
 
 SizeDistributions::SizeDistributions(const std::string& csv_path) {
     // Load size distribution parameters
-    // Format: imb_bin,event,event_q,p,spread
+    // Format: imbalance,spread,event,queue,side,p
     std::ifstream file(csv_path);
     if (!file.is_open()) {
         throw std::runtime_error("Cannot open size_distrib.csv: " + csv_path);
@@ -267,49 +297,56 @@ SizeDistributions::SizeDistributions(const std::string& csv_path) {
         std::istringstream ss(line);
         std::string token;
 
-        // imb_bin (float like -1.0, -0.9, 0.0, etc.)
+        // imbalance (0.0 to 1.0)
         std::getline(ss, token, ',');
-        double imb_bin_val = std::stod(token);
-        int imb_bin = imb_bin_to_index(imb_bin_val);
-
-        // event type
-        std::getline(ss, token, ',');
-        std::string event_str = token;
-
-        // event_q (queue number: 0, 1, or 2)
-        std::getline(ss, token, ',');
-        int queue = std::stoi(token);
-
-        // p (geometric distribution parameter)
-        std::getline(ss, token, ',');
-        double p = std::stod(token);
+        double imb_val = std::stod(token);
+        int imb_idx = imb_bin_to_index(imb_val);
 
         // spread (1 or 2)
         std::getline(ss, token, ',');
         int spread = std::stoi(token);
 
-        if (imb_bin < 0 || imb_bin >= NUM_IMB_BINS) continue;
+        // event type
+        std::getline(ss, token, ',');
+        std::string event_str = token;
+
+        // queue (signed: -2, -1, 1, 2, or 0 for creates)
+        std::getline(ss, token, ',');
+        int queue = std::stoi(token);
+
+        // side (1 or -1, skip)
+        std::getline(ss, token, ',');
+
+        // p (geometric distribution parameter)
+        std::getline(ss, token, ',');
+        double p = std::stod(token);
+
+        if (imb_idx < 0 || imb_idx >= NUM_IMB_BINS) continue;
+        int neg_idx = mirror_imb_index(imb_idx);
 
         if (spread == 1) {
-            // Spread=1: Add, Can, Trd at queue 1 or 2
             int type_idx;
             if (event_str == "Add") type_idx = 0;
-            else if (event_str == "Can") type_idx = 1;
-            else if (event_str == "Trd") type_idx = 2;
+            else if (event_str == "Cancel") type_idx = 1;
+            else if (event_str == "Trade") type_idx = 2;
             else continue;
 
-            int queue_idx = queue - 1;  // 1->0, 2->1
-            if (queue_idx >= 0 && queue_idx < 2) {
-                p_params[imb_bin][type_idx][queue_idx] = p;
+            int qi = q4_idx(queue);
+            int qi_neg = q4_idx(-queue);
+            p_params[imb_idx][type_idx][qi] = p;
+            if (imb_idx != 10) {
+                p_params[neg_idx][type_idx][qi_neg] = p;
             }
         } else if (spread == 2) {
-            // Spread>=2: Create_Bid, Create_Ask
             int create_idx;
             if (event_str == "Create_Bid") create_idx = 0;
             else if (event_str == "Create_Ask") create_idx = 1;
             else continue;
 
-            p_create[imb_bin][create_idx] = p;
+            p_create[imb_idx][create_idx] = p;
+            if (imb_idx != 10) {
+                p_create[neg_idx][1 - create_idx] = p;
+            }
         }
     }
     file.close();

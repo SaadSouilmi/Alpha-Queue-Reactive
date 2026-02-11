@@ -109,6 +109,7 @@ event: pl.Expr = (
 
 event_records: dict[str, pl.Expr] = dict(
     ts_event=pl.col("ts_event"),
+    sequence=pl.col("sequence"),
     event=event,
     event_size=pl.col("size"),
     price=pl.col("price"),
@@ -175,11 +176,10 @@ def mbp_to_qr(df: pl.LazyFrame) -> pl.LazyFrame:
 
 
 def main() -> None:
-    from tqdm import tqdm
     from lobib import preprocessing as pr, DataLoader
 
     loader = DataLoader()
-    tickers = ["T", "PFE", "VZ", "INTC"]
+    tickers = ["PFE", "T", "VZ", "INTC"]
     info = loader.ticker_info(*tickers)
     files = info.filter(pl.col("schema").eq("mbp-10-raw"))["file"].to_list()
 
@@ -189,11 +189,11 @@ def main() -> None:
         qr_out = Path(file.replace("mbp-10-raw", "qr"))
 
         # Skip if already processed
-        if qr_out.exists():
-            return
+        # if qr_out.exists():
+        #     return
 
         lf = pl.scan_parquet(file)
-        lf = pr.preprocess_lob(lf)
+        lf = pr.preprocess_mbp10(lf)
         lf = pr.truncate_time(lf)
         lf = pr.prices_to_ticks(lf)
         lf = pr.aggregate_trades(lf)
@@ -207,12 +207,13 @@ def main() -> None:
         df.write_parquet(qr_out)
 
     errors = []
-    for file in tqdm(files, colour="green"):
+    for i, file in enumerate(files, 1):
         try:
             kernel(file)
+            print(f"[{i}/{len(files)}] Processed {file}")
         except Exception as e:
             errors.append((file, str(e)))
-            tqdm.write(f"Error processing {file}: {e}")
+            print(f"[{i}/{len(files)}] Error processing {file}: {e}")
 
     if errors:
         print(f"\n{len(errors)} files failed:")

@@ -44,6 +44,8 @@ add_executable(sample
     ${QR_SOURCES}
 )
 
+target_include_directories(sample PRIVATE ${RAPIDJSON_INCLUDE_DIRS})
+
 target_link_libraries(sample
     Arrow::arrow_static
     Parquet::parquet_static
@@ -55,57 +57,12 @@ add_executable(run_metaorder
     ${QR_SOURCES}
 )
 
+target_include_directories(run_metaorder PRIVATE ${RAPIDJSON_INCLUDE_DIRS})
+
 target_link_libraries(run_metaorder
     Arrow::arrow_static
     Parquet::parquet_static
     Threads::Threads
-)
-
-# Baseline simulation executable (no metaorder)
-add_executable(run_baseline
-    cpp/bin/run_baseline.cpp
-    ${QR_SOURCES}
-)
-
-target_link_libraries(run_baseline
-    Arrow::arrow_static
-    Parquet::parquet_static
-    Threads::Threads
-)
-
-# Sample with alpha executable
-add_executable(sample_alpha
-    cpp/bin/sample_alpha.cpp
-    ${QR_SOURCES}
-)
-
-target_link_libraries(sample_alpha
-    Arrow::arrow_static
-    Parquet::parquet_static
-)
-
-# Aggressive strategy simulation executable
-add_executable(sample_strategy
-    cpp/bin/sample_strategy.cpp
-    ${QR_SOURCES}
-)
-
-target_link_libraries(sample_strategy
-    Arrow::arrow_static
-    Parquet::parquet_static
-)
-
-# HFT alpha with configurable race params (JSON config)
-add_executable(sample_hft_alpha
-    cpp/bin/sample_hft_alpha.cpp
-    ${QR_SOURCES}
-)
-
-target_include_directories(sample_hft_alpha PRIVATE ${RAPIDJSON_INCLUDE_DIRS})
-
-target_link_libraries(sample_hft_alpha
-    Arrow::arrow_static
-    Parquet::parquet_static
 )
 
 # OrderBook test executable

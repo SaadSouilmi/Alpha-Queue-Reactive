@@ -6,6 +6,7 @@ import polars as pl
 from datasketches import kll_ints_sketch
 from lobib.utils import pl_select
 from tqdm import tqdm
+from sklearn.mixture import GaussianMixture
 
 N_BINS = 11
 BINS = np.arange(11, step=1) / 10
@@ -216,6 +217,24 @@ def preprocess(
     df = compute_total_best_bin(df, quantiles=total_best_quantiles)
     df = df.with_columns(delta_t=pl.col("ts_event").diff().cast(int))
 
+    # Aggregate split trades: same ts_event and side, tack sizes onto first Trade
+    is_trade = pl.col("event").eq("Trade")
+    df = df.with_columns(
+        is_dup_trade=is_trade
+        & (pl.col("ts_event").eq(pl.col("ts_event").shift(1)))
+        & (pl.col("event_side").eq(pl.col("event_side").shift(1)))
+        & pl.col("event").shift(1).eq("Trade"),
+    )
+    df = df.with_columns(
+        trade_group_id=((is_trade & ~pl.col("is_dup_trade")) | ~is_trade).cum_sum()
+    )
+    df = df.with_columns(
+        event_size=pl.when(is_trade)
+        .then(pl.col("event_size").sum().over("trade_group_id"))
+        .otherwise(pl.col("event_size")),
+    )
+    df = df.filter(~pl.col("is_dup_trade"))
+
     # True add in spread sizes
     df = df.with_columns(
         is_create=pl.col("event").is_in(["Create_Bid", "Create_Ask"]),
@@ -242,6 +261,13 @@ def preprocess(
         .otherwise(pl.col("event_size").truediv(median_event_sizes[2]).ceil().cast(int))
     )
 
+    df = df.with_columns(
+        delta_t=pl.when(pl.col("delta_t").eq(0))
+        .then(None)
+        .otherwise(pl.col("delta_t"))
+        .forward_fill()
+    )
+
     return df.select(
         pl.exclude(
             "^Q.*$",
@@ -256,6 +282,8 @@ def preprocess(
             "price_changed",
             "group_id",
             "is_followup_add",
+            "is_dup_trade",
+            "trade_group_id",
         )
     ).rename(
         {
@@ -267,6 +295,8 @@ def preprocess(
 
 
 def daily_estimates(df: pl.LazyFrame) -> pl.LazyFrame:
+    is_create = (pl.col("event").eq("Create_Bid") | pl.col("event").eq("Create_Ask")) & pl.col("queue").eq(0)
+    df = df.filter(pl.col("spread").eq(1) | is_create)
     stats = df.group_by(
         "date",
         "imbalance",
@@ -287,3 +317,122 @@ def daily_estimates(df: pl.LazyFrame) -> pl.LazyFrame:
     )
 
     return stats
+
+
+#######################################
+### Delta_t fit
+#######################################
+
+def exp_delta_t(df: pl.LazyFrame) -> pl.DataFrame:
+    df = (
+        df.group_by(pl.col("imbalance").abs(), "spread")
+        .agg(average_dt=pl.col("delta_t_sum").sum()/pl.col("len").sum())
+        .collect()
+        .sort("imbalance", "spread")
+    )
+
+    return df
+
+def group_delta_t(df: pl.LazyFrame) -> pl.DataFrame:
+    df = df.group_by("imbalance", "spread", "event", "queue", "side").agg(pl.col("delta_t").flatten()).collect()
+    pos = df.filter(pl.col("imbalance") >= 0)
+    neg = df.filter(pl.col("imbalance") <= 0).with_columns(
+        imbalance=-pl.col("imbalance"),
+        side=-pl.col("side"),
+        queue=-pl.col("queue"),
+        event=pl.col("event").replace(
+            {"Create_Ask": "Create_Bid", "Create_Bid": "Create_Ask"}
+        ),
+    )
+
+    df = (
+        pl.concat([pos, neg])
+        .group_by("imbalance", "spread", "event", "queue", "side")
+        .agg(
+            delta_t=pl.col("delta_t").flatten(),
+        )
+    )
+
+    return df
+    
+def fit_gmm(df: pl.DataFrame, k: int = 5, floor: float = 0, random_state: int = 1337) -> pl.DataFrame:
+    rows = []
+    for row in tqdm(df.iter_rows(named=True), total=len(df), desc="Fitting GMMs"):
+        x = np.log10(np.array(row["delta_t"], dtype=float))
+        x = x[x>=floor].reshape(-1, 1)
+        gmm = GaussianMixture(n_components=k, random_state=random_state).fit(x)
+        entry = {
+            "imbalance": row["imbalance"],
+            "spread": row["spread"],
+            "event": row["event"],
+            "queue": row["queue"],
+            "side": row["side"],
+        }
+        for i in range(k):
+            entry[f"w_{i+1}"] = gmm.weights_[i]
+            entry[f"mu_{i+1}"] = gmm.means_[i, 0]
+            entry[f"sig_{i+1}"] = np.sqrt(gmm.covariances_[i, 0, 0])
+        rows.append(entry)
+    return pl.DataFrame(rows)
+
+#######################################
+### Event probabilities
+#######################################
+
+def event_probabilities(df: pl.LazyFrame, include_total_best: bool=False) -> pl.DataFrame:
+    state = ("imbalance", "spread", "total_best") if include_total_best else ("imbalance", "spread")
+    stats = df.group_by(*state, "queue", "side", "event").agg(
+        pl.col("len").sum(), pl.col("delta_t_sum").sum()
+    )
+    stats = stats.with_columns(
+        total_len_cat=pl.col("len").sum().over(*state)
+    )
+    
+    stats = stats.collect()
+    pos = stats.filter(pl.col("imbalance") >= 0)
+    neg = stats.filter(pl.col("imbalance") <= 0).with_columns(
+        imbalance=-pl.col("imbalance"),
+        side=-pl.col("side"),
+        queue=-pl.col("queue"),
+        event=pl.col("event").replace(
+            {"Create_Ask": "Create_Bid", "Create_Bid": "Create_Ask"}
+        ),
+    )
+    
+    probabilities = (
+        pl.concat([pos, neg])
+        .group_by(*state, "event", "queue", "side")
+        .agg(probability=pl.col("len").sum().truediv(pl.col("total_len_cat").sum()))
+        .sort(*state, "event", "queue")
+    )
+    return probabilities
+
+#######################################
+### Volumes
+#######################################
+
+def average_volumes(df: pl.LazyFrame) -> pl.DataFrame:
+    df = (
+        df.group_by("imbalance", "spread", "event", "queue", "side")
+        .agg(pl.col("len").sum(), pl.col("size").flatten().sum())
+        .collect()
+    )
+    
+    pos = df.filter(pl.col("imbalance") >= 0)
+    neg = df.filter(pl.col("imbalance") <= 0).with_columns(
+        imbalance=-pl.col("imbalance"),
+        side=-pl.col("side"),
+        queue=-pl.col("queue"),
+        event=pl.col("event").replace(
+            {"Create_Ask": "Create_Bid", "Create_Bid": "Create_Ask"}
+        ),
+    )
+    
+    size_distrib = (
+        pl.concat([pos, neg])
+        .group_by("imbalance", "spread", "event", "queue", "side")
+        .agg(p=pl.col("len").sum() / pl.col("size").sum())
+        .sort("imbalance", "spread", "event", "queue")
+    )
+
+    return size_distrib

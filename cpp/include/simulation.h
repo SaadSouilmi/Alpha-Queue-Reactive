@@ -1,10 +1,8 @@
 #pragma once
 #include "orderbook.h"
 #include "qr_model.h"
-#include "strategy.h"
 #include <vector>
 #include <string>
-#include <utility>
 
 namespace qr {
 
@@ -14,7 +12,6 @@ namespace qr {
     // Event source constants
     constexpr int8_t SOURCE_QR = 0;
     constexpr int8_t SOURCE_RACE = 1;
-    constexpr int8_t SOURCE_STRATEGY = 2;
 
     struct EventRecord {
         // Sequence number for ordering
@@ -42,7 +39,7 @@ namespace qr {
         bool partial;
         double bias;
         double alpha;
-        int8_t source;  // SOURCE_QR=0, SOURCE_RACE=1, SOURCE_STRATEGY=2
+        int8_t source;  // SOURCE_QR=0, SOURCE_RACE=1
 
         void record_lob(const OrderBook& lob) {
             best_bid_price = lob.best_bid();
@@ -84,39 +81,9 @@ namespace qr {
         Side side;
     };
 
-
-    // Unified simulation function (replaces run_simple, run_with_alpha, run_with_race)
+    // Unified simulation function
     Buffer run_simulation(OrderBook& lob, QRModel& model, int64_t duration,
                           Alpha* alpha = nullptr, MarketImpact* impact = nullptr,
                           Race* race = nullptr);
-
-    // HFT alpha simulation: races occur naturally without forcing QR events after each race
-    // Alpha signal = w_ou * X_ou + w_imb * imbalance
-    Buffer run_hft_alpha(OrderBook& lob, QRModel& model, int64_t duration,
-                         Alpha& alpha, Race& race, double w_ou = 1.0,
-                         double w_imb = 0.0, double alpha_scale = 1.0,
-                         MarketImpact* impact = nullptr);
-
-    // Strategy simulation (Race* = nullptr for no-race)
-    std::pair<Buffer, StrategyBuffer> run_aggressive(OrderBook& lob, QRModel& model,
-                                                      MarketImpact& impact, Race* race,
-                                                      Alpha& alpha, AggressiveStrategy& strategy,
-                                                      int64_t duration, double alpha_scale = 1.0,
-                                                      double theta = 0.0);
-
-    // Legacy functions (kept for backward compatibility)
-    Buffer run_metaorder(OrderBook& lob, QRModel& model, MarketImpact& impact, MetaOrder& metaorder, int64_t duration);
-    Buffer run_with_race(OrderBook& lob, QRModel& model, MarketImpact& impact, Race& race, Alpha& alpha, int64_t duration, double alpha_scale = 1.0, double theta = 0.0);
-
-    // Alpha PnL computation
-    struct AlphaPnL {
-        std::vector<double> lag_sec;
-        std::vector<double> alpha_tickreturn_cov;
-        std::vector<double> alpha_tickreturn_cov_ci;  // 95% CI half-width
-
-        void save_csv(const std::string& path) const;
-    };
-
-    AlphaPnL compute_alpha_pnl(const Buffer& buffer, const std::vector<int64_t>& lags_ns);
 
 }

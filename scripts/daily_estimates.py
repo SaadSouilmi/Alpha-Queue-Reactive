@@ -12,7 +12,7 @@ loader = DataLoader()
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Aggregate relevant qr statistics per day")
-    parser.add_argument("ticker", type=str, help="Ticker symbol (e.g., PFE)")
+    parser.add_argument("--ticker", type=str, help="Ticker symbol (e.g., PFE)")
     return parser.parse_args()
 
 

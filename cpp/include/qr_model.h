@@ -12,23 +12,25 @@
 namespace qr {
 
     // Size distribution parameters for geometric distribution
-    // Key: (imb_bin_idx, event_type, queue_level) -> p parameter
+    // Key: (imb_bin, event_type, signed_queue) -> p parameter
     struct SizeDistributions {
         static constexpr int NUM_IMB_BINS = 21;
         static constexpr int32_t MAX_SIZE = 50;
 
-        // Spread=1: [imb_bin][event_type: 0=Add, 1=Can, 2=Trd][queue: 0=q1, 1=q2]
-        // Trd only has queue 1, so [imb][2][1] is unused
-        std::array<std::array<std::array<double, 2>, 3>, NUM_IMB_BINS> p_params{};
+        // Spread=1: [imb_bin][event_type: 0=Add, 1=Cancel, 2=Trade][queue: 4 signed slots]
+        // queue slots: {-2→0, -1→1, 1→2, 2→3}
+        // Trade only has q=-1 and q=1, so slots 0 and 3 are unused for Trade
+        std::array<std::array<std::array<double, 4>, 3>, NUM_IMB_BINS> p_params{};
 
-        // Spread>=2: [imb_bin][event_type: 0=Create_Bid, 1=Create_Ask]
+        // Spread>=2: [imb_bin][0=Create_Bid, 1=Create_Ask]
         std::array<std::array<double, 2>, NUM_IMB_BINS> p_create{};
 
         SizeDistributions() = default;
         SizeDistributions(const std::string& csv_path);
 
         // Sample size from geometric distribution capped at MAX_SIZE
-        int32_t sample_size(int imb_bin, OrderType type, int queue, std::mt19937_64& rng) const {
+        // queue_nbr is signed: -2, -1, 1, 2
+        int32_t sample_size(int imb_bin, OrderType type, int queue_nbr, std::mt19937_64& rng) const {
             double p = 0.0;
 
             if (type == OrderType::CreateBid) {
@@ -37,8 +39,7 @@ namespace qr {
                 p = p_create[imb_bin][1];
             } else {
                 int type_idx = (type == OrderType::Add) ? 0 : (type == OrderType::Cancel) ? 1 : 2;
-                int queue_idx = queue - 1;  // queue 1 -> 0, queue 2 -> 1
-                p = p_params[imb_bin][type_idx][queue_idx];
+                p = p_params[imb_bin][type_idx][q4_idx(queue_nbr)];
             }
 
             if (p <= 0.0 || p >= 1.0) return 1;  // fallback
@@ -46,6 +47,12 @@ namespace qr {
             std::geometric_distribution<int32_t> dist(p);
             int32_t size = dist(rng) + 1;  // geometric_distribution gives 0,1,2,... we want 1,2,3,...
             return std::min(size, MAX_SIZE);
+        }
+
+    private:
+        static int q4_idx(int q) {
+            switch (q) { case -2: return 0; case -1: return 1; case 1: return 2; case 2: return 3; }
+            return 1; // fallback
         }
     };
 
@@ -306,7 +313,7 @@ namespace qr {
     class DeltaT {
     public:
         virtual ~DeltaT() = default;
-        virtual int64_t sample(int imb_bin, int spread, std::mt19937_64& rng) const = 0;
+        virtual int64_t sample(int imb_bin, int spread, const Event& event, std::mt19937_64& rng) const = 0;
     };
 
     // Exponential dt using lambda from QRParams (the original approach)
@@ -314,7 +321,7 @@ namespace qr {
     public:
         ExponentialDeltaT(const QRParams& params) : params_(params) {}
 
-        int64_t sample(int imb_bin, int spread, std::mt19937_64& rng) const override {
+        int64_t sample(int imb_bin, int spread, const Event& /*event*/, std::mt19937_64& rng) const override {
             double lambda = params_.state_params[std::clamp(imb_bin, 0, 20)][std::clamp(spread, 0, 1)].lambda;
             double dt = std::exponential_distribution<>(lambda)(rng);
             return static_cast<int64_t>(std::ceil(dt));
@@ -324,9 +331,13 @@ namespace qr {
         const QRParams& params_;
     };
 
-    // Gaussian mixture model for dt (in log10 space), conditional on imbalance bin and spread
+    // 5-component Gaussian mixture for dt (log10 space), per (imbalance, spread, event, queue)
     class MixtureDeltaT : public DeltaT {
     public:
+        static constexpr int K = 5;
+        // Add: 4 queues, Cancel: 4 queues, Trade: 2 queues, Create_Bid, Create_Ask
+        static constexpr int NUM_SLOTS = 12;
+
         MixtureDeltaT(const std::string& csv_path) {
             std::ifstream file(csv_path);
             if (!file.is_open()) {
@@ -340,87 +351,122 @@ namespace qr {
                 std::istringstream ss(line);
                 std::string token;
 
-                // imb_bin
+                // imbalance (0.0 to 1.0)
                 std::getline(ss, token, ',');
-                double imb_bin_val = std::stod(token);
-                int imb_idx = static_cast<int>(std::round(imb_bin_val * 10.0)) + 10;
-                imb_idx = std::clamp(imb_idx, 0, 20);
+                double imb_val = std::stod(token);
+                int imb_idx = static_cast<int>(std::round(imb_val * 10.0)) + 10;
+                imb_idx = std::clamp(imb_idx, 10, 20);
 
-                // spread (0 or 1)
+                // spread (1 or 2)
                 std::getline(ss, token, ',');
-                int spread_idx = std::clamp(std::stoi(token), 0, 1);
+                int spread = std::stoi(token) - 1;
 
-                // w1, mu1, sigma1
+                // event
                 std::getline(ss, token, ',');
-                params_[imb_idx][spread_idx].w1 = std::stod(token);
-                std::getline(ss, token, ',');
-                params_[imb_idx][spread_idx].mu1 = std::stod(token);
-                std::getline(ss, token, ',');
-                params_[imb_idx][spread_idx].sigma1 = std::stod(token);
+                std::string event_str = token;
 
-                // w2, mu2, sigma2
+                // queue
                 std::getline(ss, token, ',');
-                params_[imb_idx][spread_idx].w2 = std::stod(token);
-                std::getline(ss, token, ',');
-                params_[imb_idx][spread_idx].mu2 = std::stod(token);
-                std::getline(ss, token, ',');
-                params_[imb_idx][spread_idx].sigma2 = std::stod(token);
+                int queue = std::stoi(token);
 
-                // w3, mu3, sigma3
+                // side (skip)
                 std::getline(ss, token, ',');
-                params_[imb_idx][spread_idx].w3 = std::stod(token);
-                std::getline(ss, token, ',');
-                params_[imb_idx][spread_idx].mu3 = std::stod(token);
-                std::getline(ss, token, ',');
-                params_[imb_idx][spread_idx].sigma3 = std::stod(token);
 
-                params_[imb_idx][spread_idx].loaded = true;
-            }
+                // Read K components: w_i, mu_i, sig_i
+                MixtureParams mp{};
+                for (int i = 0; i < K; ++i) {
+                    std::getline(ss, token, ',');
+                    mp.w[i] = std::stod(token);
+                    std::getline(ss, token, ',');
+                    mp.mu[i] = std::stod(token);
+                    std::getline(ss, token, ',');
+                    mp.sig[i] = std::stod(token);
+                }
+                mp.loaded = true;
 
-            // Validate all entries loaded
-            for (int i = 0; i < 21; ++i) {
-                for (int s = 0; s < 2; ++s) {
-                    if (!params_[i][s].loaded) {
-                        double imb = (i - 10) / 10.0;
-                        throw std::runtime_error("Missing mixture params for imb_bin=" +
-                            std::to_string(imb) + ", spread=" + std::to_string(s));
-                    }
+                int slot = str_to_slot(event_str, queue);
+                if (slot < 0) continue;
+
+                params_[imb_idx][spread][slot] = mp;
+
+                // Mirror to negative imbalance
+                if (imb_idx != 10) {
+                    int neg_idx = 20 - imb_idx;
+                    int neg_slot = mirror_slot(event_str, queue);
+                    params_[neg_idx][spread][neg_slot] = mp;
                 }
             }
         }
 
-        int64_t sample(int imb_bin, int spread, std::mt19937_64& rng) const override {
-            const auto& p = params_[std::clamp(imb_bin, 0, 20)][std::clamp(spread, 0, 1)];
+        int64_t sample(int imb_bin, int spread, const Event& event, std::mt19937_64& rng) const override {
+            int slot = event_to_slot(event.type, event.queue_nbr);
+            const auto& p = params_[std::clamp(imb_bin, 0, 20)][std::clamp(spread, 0, 1)][slot];
 
-            // Choose component based on cumulative weights
-            double u = std::uniform_real_distribution<>(0.0, 1.0)(rng);
-            double mu, sigma;
-            if (u < p.w1) {
-                mu = p.mu1;
-                sigma = p.sigma1;
-            } else if (u < p.w1 + p.w2) {
-                mu = p.mu2;
-                sigma = p.sigma2;
-            } else {
-                mu = p.mu3;
-                sigma = p.sigma3;
+            if (!p.loaded) {
+                // Fallback: exponential with 100ms mean
+                return static_cast<int64_t>(std::exponential_distribution<>(1e-8)(rng));
             }
 
-            // Sample from normal in log10 space, clamp to min 1 (so dt >= 10 ns)
-            double log_dt = std::max(1.0, std::normal_distribution<>(mu, sigma)(rng));
+            // Choose component
+            double u = std::uniform_real_distribution<>(0.0, 1.0)(rng);
+            double cum = 0.0;
+            int k = K - 1;
+            for (int i = 0; i < K; ++i) {
+                cum += p.w[i];
+                if (u < cum) { k = i; break; }
+            }
 
-            // Convert back: dt = 10^log_dt (in nanoseconds)
+            double log_dt = std::max(1.0, std::normal_distribution<>(p.mu[k], p.sig[k])(rng));
             return static_cast<int64_t>(std::pow(10.0, log_dt));
         }
 
     private:
         struct MixtureParams {
-            double w1, mu1, sigma1;
-            double w2, mu2, sigma2;
-            double w3, mu3, sigma3;
+            double w[5]{}, mu[5]{}, sig[5]{};
             bool loaded = false;
         };
-        std::array<std::array<MixtureParams, 2>, 21> params_;  // [imb_bin][spread]
+
+        // [imb 0-20][spread 0-1][slot 0-11]
+        std::array<std::array<std::array<MixtureParams, NUM_SLOTS>, 2>, 21> params_{};
+
+        // Slot layout:
+        //  0-3: Add    q={-2,-1,1,2}
+        //  4-7: Cancel q={-2,-1,1,2}
+        //  8-9: Trade  q={-1,1}
+        // 10:   Create_Bid
+        // 11:   Create_Ask
+
+        static int q4_idx(int q) {
+            switch (q) { case -2: return 0; case -1: return 1; case 1: return 2; case 2: return 3; }
+            return 1;
+        }
+
+        static int q2_idx(int q) { return (q == -1) ? 0 : 1; }
+
+        static int event_to_slot(OrderType type, int q) {
+            if (type == OrderType::CreateBid) return 10;
+            if (type == OrderType::CreateAsk) return 11;
+            if (type == OrderType::Trade) return 8 + q2_idx(q);
+            int t = (type == OrderType::Add) ? 0 : 4;
+            return t + q4_idx(q);
+        }
+
+        static int str_to_slot(const std::string& s, int q) {
+            if (s == "Create_Bid") return 10;
+            if (s == "Create_Ask") return 11;
+            if (s == "Trade") return 8 + q2_idx(q);
+            int t = (s == "Add") ? 0 : 4;
+            return t + q4_idx(q);
+        }
+
+        // Mirror: flip queue sign, swap Create_Bid/Ask
+        static int mirror_slot(const std::string& s, int q) {
+            if (s == "Create_Bid") return 11;
+            if (s == "Create_Ask") return 10;
+            if (s == "Trade") return 8 + q2_idx(-q);
+            int t = (s == "Add") ? 0 : 4;
+            return t + q4_idx(-q);
+        }
     };
 
     // ============================================================================
@@ -504,16 +550,13 @@ namespace qr {
             }
             StateParams& state_params = *state_params_ptr;
             const Event& event = state_params.sample_event(rng_);
+            last_event_ = event;
 
             int32_t size = 1;
             if (size_dists_) {
                 if (lob_->spread() == 1) {
-                    // Spread=1: Add, Can, Trd at queue 1 or 2
-                    int queue = std::abs(event.queue_nbr);
-                    if (queue == 0) queue = 1;  // Trd uses queue 1
-                    size = size_dists_->sample_size(imb_bin, event.type, queue, rng_);
+                    size = size_dists_->sample_size(imb_bin, event.type, event.queue_nbr, rng_);
                 } else if (event.type == OrderType::CreateBid || event.type == OrderType::CreateAsk) {
-                    // Spread>=2: Create events
                     size = size_dists_->sample_size(imb_bin, event.type, 0, rng_);
                 }
             }
@@ -523,13 +566,12 @@ namespace qr {
         }
 
         int64_t sample_dt() {
+            uint8_t imb_bin = get_imbalance_bin(lob_->imbalance());
+            int spread = std::min(lob_->spread() - 1, 1);
             if (delta_t_) {
-                uint8_t imb_bin = get_imbalance_bin(lob_->imbalance());
-                int spread = std::min(lob_->spread() - 1, 1);
-                return delta_t_->sample(imb_bin, spread, rng_);
+                return delta_t_->sample(imb_bin, spread, last_event_, rng_);
             }
-            StateParams& state_params = get_state_params();
-            return state_params.sample_dt(rng_);
+            return state_params_at(imb_bin, spread).sample_dt(rng_);
         }
 
         void bias(double b) {
@@ -552,6 +594,7 @@ namespace qr {
         const SizeDistributions* size_dists_;
         const DeltaT* delta_t_;
         std::mt19937_64 rng_;
+        Event last_event_{};
 
         // 21 bins: -1.0 (idx 0), -0.9 (idx 1), ..., 0.0 (idx 10), ..., 0.9 (idx 19), 1.0 (idx 20)
         // Bin boundaries:
@@ -598,6 +641,9 @@ namespace qr {
             uint8_t imbalance_bin = get_imbalance_bin(lob_->imbalance());
             int32_t spread = std::min(lob_->spread()-1, 1);
             return params_.get(imbalance_bin, spread);
+        }
+        StateParams& state_params_at(int imb_bin, int spread) {
+            return params_.get(imb_bin, spread);
         }
         int32_t get_price(const Event& event) const {
             if (event.type == OrderType::CreateBid)

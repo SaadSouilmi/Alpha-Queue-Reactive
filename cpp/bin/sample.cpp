@@ -237,12 +237,13 @@ Example config.json:
     uint64_t alpha_seed = seed_rng();
 
     // Load data
-    QueueDistributions dists(data_path + "/invariant_distributions_qmax50.csv");
+    std::string params_path = data_path + "/qr_params";
+    QueueDistributions dists(params_path + "/invariant_distributions_qmax50.csv");
 
     std::unique_ptr<MixtureDeltaT> delta_t_ptr;
     if (use_mixture) {
-        std::string delta_t_file = use_race ? "/delta_t_mixtures_floored.csv" : "/delta_t_mixtures.csv";
-        delta_t_ptr = std::make_unique<MixtureDeltaT>(data_path + delta_t_file);
+        std::string delta_t_file = use_race ? "/delta_t_gmm_floored.csv" : "/delta_t_gmm.csv";
+        delta_t_ptr = std::make_unique<MixtureDeltaT>(params_path + delta_t_file);
     }
 
     // Initialize order book
@@ -252,12 +253,12 @@ Example config.json:
               {1520, 1521, 1522, 1523},
               {6, 17, 22, 23});
 
-    QRParams params(data_path);
+    QRParams params(params_path);
     if (use_total_lvl) {
-        params.load_total_lvl_quantiles(data_path + "/total_lvl_quantiles.csv");
-        params.load_event_probabilities_3d(data_path + "/event_probabilities_3d.csv");
+        params.load_total_lvl_quantiles(params_path + "/total_lvl_quantiles.csv");
+        params.load_event_probabilities_3d(params_path + "/event_probabilities_3D.csv");
     }
-    SizeDistributions size_dists(data_path + "/size_distrib.csv");
+    SizeDistributions size_dists(params_path + "/size_distrib.csv");
 
     // Create model
     std::unique_ptr<QRModel> model_ptr;
