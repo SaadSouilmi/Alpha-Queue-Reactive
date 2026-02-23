@@ -11,42 +11,40 @@
 
 namespace qr {
 
-    // Size distribution parameters for geometric distribution
-    // Key: (imb_bin, event_type, signed_queue) -> p parameter
+    // Empirical size distributions (inverse-CDF sampling)
+    // Key: (imb_bin, event_type, signed_queue) -> cumulative probability vector
     struct SizeDistributions {
         static constexpr int NUM_IMB_BINS = 21;
         static constexpr int32_t MAX_SIZE = 50;
 
         // Spread=1: [imb_bin][event_type: 0=Add, 1=Cancel, 2=Trade][queue: 4 signed slots]
-        // queue slots: {-2→0, -1→1, 1→2, 2→3}
-        // Trade only has q=-1 and q=1, so slots 0 and 3 are unused for Trade
-        std::array<std::array<std::array<double, 4>, 3>, NUM_IMB_BINS> p_params{};
+        std::array<std::array<std::array<std::vector<double>, 4>, 3>, NUM_IMB_BINS> cum_probs{};
 
         // Spread>=2: [imb_bin][0=Create_Bid, 1=Create_Ask]
-        std::array<std::array<double, 2>, NUM_IMB_BINS> p_create{};
+        std::array<std::array<std::vector<double>, 2>, NUM_IMB_BINS> cum_probs_create{};
 
         SizeDistributions() = default;
         SizeDistributions(const std::string& csv_path);
 
-        // Sample size from geometric distribution capped at MAX_SIZE
+        // Sample size via inverse-CDF on empirical distribution
         // queue_nbr is signed: -2, -1, 1, 2
         int32_t sample_size(int imb_bin, OrderType type, int queue_nbr, std::mt19937_64& rng) const {
-            double p = 0.0;
+            const std::vector<double>* cp = nullptr;
 
             if (type == OrderType::CreateBid) {
-                p = p_create[imb_bin][0];
+                cp = &cum_probs_create[imb_bin][0];
             } else if (type == OrderType::CreateAsk) {
-                p = p_create[imb_bin][1];
+                cp = &cum_probs_create[imb_bin][1];
             } else {
                 int type_idx = (type == OrderType::Add) ? 0 : (type == OrderType::Cancel) ? 1 : 2;
-                p = p_params[imb_bin][type_idx][q4_idx(queue_nbr)];
+                cp = &cum_probs[imb_bin][type_idx][q4_idx(queue_nbr)];
             }
 
-            if (p <= 0.0 || p >= 1.0) return 1;  // fallback
+            if (!cp || cp->empty()) return 1;
 
-            std::geometric_distribution<int32_t> dist(p);
-            int32_t size = dist(rng) + 1;  // geometric_distribution gives 0,1,2,... we want 1,2,3,...
-            return std::min(size, MAX_SIZE);
+            double u = std::uniform_real_distribution<>(0.0, 1.0)(rng);
+            auto it = std::lower_bound(cp->begin(), cp->end(), u);
+            return static_cast<int32_t>(it - cp->begin()) + 1;  // 1-based sizes
         }
 
     private:

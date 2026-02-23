@@ -412,15 +412,18 @@ def event_probabilities(df: pl.LazyFrame, include_total_best: bool=False) -> pl.
 ### Volumes
 #######################################
 
+MAX_SIZE = 50
+
+
 def average_volumes(df: pl.LazyFrame) -> pl.DataFrame:
-    df = (
+    stats = (
         df.group_by("imbalance", "spread", "event", "queue", "side")
-        .agg(pl.col("len").sum(), pl.col("size").flatten().sum())
+        .agg(pl.col("size").flatten())
         .collect()
     )
-    
-    pos = df.filter(pl.col("imbalance") >= 0)
-    neg = df.filter(pl.col("imbalance") <= 0).with_columns(
+
+    pos = stats.filter(pl.col("imbalance") >= 0)
+    neg = stats.filter(pl.col("imbalance") <= 0).with_columns(
         imbalance=-pl.col("imbalance"),
         side=-pl.col("side"),
         queue=-pl.col("queue"),
@@ -428,12 +431,33 @@ def average_volumes(df: pl.LazyFrame) -> pl.DataFrame:
             {"Create_Ask": "Create_Bid", "Create_Bid": "Create_Ask"}
         ),
     )
-    
-    size_distrib = (
+
+    sizes = (
         pl.concat([pos, neg])
         .group_by("imbalance", "spread", "event", "queue", "side")
-        .agg(p=pl.col("len").sum() / pl.col("size").sum())
-        .sort("imbalance", "spread", "event", "queue")
+        .agg(pl.col("size").flatten())
     )
 
-    return size_distrib
+    size_hist = (
+        sizes.explode("size")
+        .with_columns(pl.col("size").clip(1, MAX_SIZE))
+        .group_by("imbalance", "spread", "event", "queue", "side", "size")
+        .len()
+        .with_columns(
+            (pl.col("len") / pl.col("len").sum()
+             .over("imbalance", "spread", "event", "queue", "side"))
+            .alias("prob")
+        )
+        .drop("len")
+        .pivot(on="size", index=["imbalance", "spread", "event", "queue", "side"], values="prob")
+        .fill_null(0.0)
+    )
+
+    # Ensure all size columns 1..MAX_SIZE exist
+    for i in range(1, MAX_SIZE + 1):
+        if str(i) not in size_hist.columns:
+            size_hist = size_hist.with_columns(pl.lit(0.0).alias(str(i)))
+
+    key_cols = ["imbalance", "spread", "event", "queue", "side"]
+    size_cols = [str(i) for i in range(1, MAX_SIZE + 1)]
+    return size_hist.select(key_cols + size_cols).sort("imbalance", "spread", "event", "queue")

@@ -283,8 +283,8 @@ void QRParams::load_event_probabilities_3d(const std::string& csv_path) {
 }
 
 SizeDistributions::SizeDistributions(const std::string& csv_path) {
-    // Load size distribution parameters
-    // Format: imbalance,spread,event,queue,side,p
+    // Load empirical size distributions
+    // Format: imbalance,spread,event,queue,side,1,2,...,50
     std::ifstream file(csv_path);
     if (!file.is_open()) {
         throw std::runtime_error("Cannot open size_distrib.csv: " + csv_path);
@@ -314,12 +314,17 @@ SizeDistributions::SizeDistributions(const std::string& csv_path) {
         std::getline(ss, token, ',');
         int queue = std::stoi(token);
 
-        // side (1 or -1, skip)
+        // side (skip)
         std::getline(ss, token, ',');
 
-        // p (geometric distribution parameter)
-        std::getline(ss, token, ',');
-        double p = std::stod(token);
+        // Read MAX_SIZE probabilities, convert to CDF
+        std::vector<double> cdf(MAX_SIZE);
+        double cumsum = 0.0;
+        for (int i = 0; i < MAX_SIZE; i++) {
+            std::getline(ss, token, ',');
+            cumsum += std::stod(token);
+            cdf[i] = cumsum;
+        }
 
         if (imb_idx < 0 || imb_idx >= NUM_IMB_BINS) continue;
         int neg_idx = mirror_imb_index(imb_idx);
@@ -333,9 +338,9 @@ SizeDistributions::SizeDistributions(const std::string& csv_path) {
 
             int qi = q4_idx(queue);
             int qi_neg = q4_idx(-queue);
-            p_params[imb_idx][type_idx][qi] = p;
+            cum_probs[imb_idx][type_idx][qi] = cdf;
             if (imb_idx != 10) {
-                p_params[neg_idx][type_idx][qi_neg] = p;
+                cum_probs[neg_idx][type_idx][qi_neg] = cdf;
             }
         } else if (spread == 2) {
             int create_idx;
@@ -343,9 +348,9 @@ SizeDistributions::SizeDistributions(const std::string& csv_path) {
             else if (event_str == "Create_Ask") create_idx = 1;
             else continue;
 
-            p_create[imb_idx][create_idx] = p;
+            cum_probs_create[imb_idx][create_idx] = cdf;
             if (imb_idx != 10) {
-                p_create[neg_idx][1 - create_idx] = p;
+                cum_probs_create[neg_idx][1 - create_idx] = cdf;
             }
         }
     }
