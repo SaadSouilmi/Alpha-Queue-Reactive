@@ -8,6 +8,8 @@
 #include <filesystem>
 #include <functional>
 #include <iomanip>
+#include <sys/file.h>
+#include <unistd.h>
 #include <rapidjson/document.h>
 #include <rapidjson/istreamwrapper.h>
 #include <rapidjson/ostreamwrapper.h>
@@ -43,7 +45,7 @@ std::string get_string(const rj::Value& obj, const char* key, const std::string&
 std::string hash_config(const std::string& content) {
     size_t h = std::hash<std::string>{}(content);
     std::ostringstream oss;
-    oss << std::hex << std::setfill('0') << std::setw(8) << (h & 0xFFFFFFFF);
+    oss << std::hex << std::setfill('0') << std::setw(16) << h;
     return oss.str();
 }
 
@@ -56,6 +58,11 @@ std::string read_file(const std::string& path) {
 
 void update_registry(const std::string& registry_path, const std::string& hash,
                      const std::string& config_content, uint64_t seed_used) {
+    // File lock for concurrent safety
+    std::string lock_path = registry_path + ".lock";
+    int lock_fd = open(lock_path.c_str(), O_CREAT | O_RDWR, 0666);
+    if (lock_fd >= 0) flock(lock_fd, LOCK_EX);
+
     rj::Document registry;
     registry.SetObject();
 
@@ -98,6 +105,11 @@ void update_registry(const std::string& registry_path, const std::string& hash,
     rj::PrettyWriter<rj::OStreamWrapper> writer(osw);
     registry.Accept(writer);
     ofs << "\n";
+
+    if (lock_fd >= 0) {
+        flock(lock_fd, LOCK_UN);
+        close(lock_fd);
+    }
 }
 
 int main(int argc, char* argv[]) {
@@ -111,6 +123,8 @@ Example config.json:
   "seed": 12345,
   "use_mixture": true,
   "use_total_lvl": false,
+  "use_race": true,
+  "use_alpha": true,
 
   "impact": {"type": "no_impact"},
 
@@ -129,7 +143,8 @@ Example config.json:
 
   "alpha": {
     "kappa": 0.5,
-    "sigma": 0.5
+    "sigma": 0.5,
+    "scale": 1.0
   }
 }
 )";
@@ -166,8 +181,10 @@ Example config.json:
         impact_type = get_string(impact_cfg, "type", "no_impact");
     }
 
-    // Race config (optional — if absent, no race)
-    bool use_race = doc.HasMember("race") && doc["race"].IsObject();
+    // Race config
+    bool use_race = get_bool(doc, "use_race", false);
+    bool use_alpha = get_bool(doc, "use_alpha", false);
+    bool do_alpha_pnl = get_bool(doc, "compute_alpha_pnl", false);
     bool use_weibull = true;
     RaceParams race_params;
     if (use_race) {
@@ -187,14 +204,17 @@ Example config.json:
     // OU config (only used if race is enabled)
     double kappa = 0.5;
     double sigma = 0.5;
+    double alpha_scale = 1.0;
     if (doc.HasMember("alpha") && doc["alpha"].IsObject()) {
         const auto& ou = doc["alpha"];
         kappa = get_double(ou, "kappa", 0.5);
         sigma = get_double(ou, "sigma", 0.5);
+        alpha_scale = get_double(ou, "scale", 1.0);
     }
 
     // Output
     std::string output_path = results_path + config_hash + ".parquet";
+    std::string alpha_pnl_path = results_path + config_hash + "_alpha_pnl.csv";
     std::string registry_path = results_path + "registry.json";
 
     // Print config
@@ -211,6 +231,9 @@ Example config.json:
     } else if (impact_type == "time_decay") {
         std::cout << " (half_life=" << get_double(impact_cfg, "half_life_sec", 30.0)
                   << "s, m=" << get_double(impact_cfg, "m", 4.0) << ")";
+    } else if (impact_type == "power_law") {
+        int K = impact_cfg.HasMember("half_lives") ? impact_cfg["half_lives"].GetArray().Size() : 0;
+        std::cout << " (K=" << K << " components, m=" << get_double(impact_cfg, "m", 4.0) << ")";
     }
     std::cout << "\n";
     if (use_race) {
@@ -224,9 +247,13 @@ Example config.json:
         std::cout << "  racer_scale: " << race_params.racer_scale << "\n";
         std::cout << "  mean_size: " << race_params.mean_size << "\n";
         std::cout << "  alpha_decay: " << race_params.alpha_decay << "\n";
-        std::cout << "OU: kappa=" << kappa << ", sigma=" << sigma << "\n";
     } else {
         std::cout << "Race: off\n";
+    }
+    if (use_alpha) {
+        std::cout << "OU: kappa=" << kappa << ", sigma=" << sigma << ", scale=" << alpha_scale << "\n";
+    } else {
+        std::cout << "Alpha: off\n";
     }
     std::cout << "Seed: " << master_seed << "\n";
 
@@ -276,8 +303,10 @@ Example config.json:
     std::unique_ptr<LogisticRace> race_ptr;
     std::unique_ptr<MarketImpact> impact_ptr;
 
+    if (use_alpha) {
+        alpha_ptr = std::make_unique<OUAlpha>(kappa, sigma, alpha_seed, alpha_scale);
+    }
     if (use_race) {
-        alpha_ptr = std::make_unique<OUAlpha>(kappa, sigma, alpha_seed);
         race_ptr = std::make_unique<LogisticRace>(data_path, use_weibull, race_params);
     }
 
@@ -289,6 +318,18 @@ Example config.json:
         double a = get_double(impact_cfg, "alpha", 0.01);
         double m = get_double(impact_cfg, "m", 4.0);
         impact_ptr = std::make_unique<EMAImpact>(a, m);
+    } else if (impact_type == "power_law") {
+        double m = get_double(impact_cfg, "m", 4.0);
+        std::vector<double> half_lives, weights;
+        if (impact_cfg.HasMember("half_lives") && impact_cfg["half_lives"].IsArray()) {
+            for (const auto& v : impact_cfg["half_lives"].GetArray())
+                half_lives.push_back(v.GetDouble());
+        }
+        if (impact_cfg.HasMember("weights") && impact_cfg["weights"].IsArray()) {
+            for (const auto& v : impact_cfg["weights"].GetArray())
+                weights.push_back(v.GetDouble());
+        }
+        impact_ptr = std::make_unique<PowerLawImpact>(half_lives, weights, m);
     } else if (impact_type != "no_impact") {
         std::cerr << "Unknown impact type: " << impact_type << "\n";
         return 1;
@@ -300,8 +341,8 @@ Example config.json:
                                     alpha_ptr.get(), impact_ptr.get(), race_ptr.get());
     auto end = std::chrono::high_resolution_clock::now();
 
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    std::cout << "Simulation: " << elapsed.count() << " ms\n";
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(end - start);
+    std::cout << "Simulation: " << elapsed.count() << " s\n";
     std::cout << "Events: " << result.num_events() << "\n";
 
     // Save
@@ -310,9 +351,27 @@ Example config.json:
     result.save_parquet(output_path);
     auto end_save = std::chrono::high_resolution_clock::now();
 
-    auto save_time = std::chrono::duration_cast<std::chrono::milliseconds>(end_save - start_save);
-    std::cout << "Save: " << save_time.count() << " ms\n";
+    auto save_time = std::chrono::duration_cast<std::chrono::seconds>(end_save - start_save);
+    std::cout << "Save: " << save_time.count() << " s\n";
     std::cout << "Output: " << output_path << "\n";
+
+    if (do_alpha_pnl){
+        std::vector<int64_t> lags_ns;
+        for (int s = 30; s <= 30 * 60; s += 30) {
+            lags_ns.push_back(static_cast<int64_t>(s) * 1'000'000'000);
+        }
+        std::vector<double> quantiles;
+        for (int i = 1; i <= 9; i++){
+            quantiles.push_back((double)i / 10.0);
+        }
+        auto start = std::chrono::high_resolution_clock::now();
+        AlphaPnL result_alpha = compute_alpha_pnl(result, lags_ns, quantiles);
+        result_alpha.save_csv(alpha_pnl_path);
+        auto end = std::chrono::high_resolution_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(end - start);
+        std::cout << "Alpha P&L Computation: " << elapsed.count() << "s\n";
+        
+    }
 
     // Update registry
     update_registry(registry_path, config_hash, config_content, master_seed);

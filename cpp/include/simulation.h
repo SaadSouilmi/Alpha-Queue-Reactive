@@ -1,13 +1,15 @@
 #pragma once
 #include "orderbook.h"
 #include "qr_model.h"
+#include "strategy.h"
 #include <vector>
 #include <string>
 
 namespace qr {
 
-    // Forward declaration
+    // Forward declarations
     class Race;
+    struct DeltaDistrib;
 
     // Event source constants
     constexpr int8_t SOURCE_QR = 0;
@@ -35,6 +37,7 @@ namespace qr {
         Side side;
         int32_t price;
         int32_t volume;
+        int32_t filled_size = 0;
         bool rejected;
         bool partial;
         double bias;
@@ -81,9 +84,102 @@ namespace qr {
         Side side;
     };
 
+    struct AlphaPnL {
+        std::vector<double> lag_sec;
+        std::vector<double> quantiles;
+        std::vector<double> thresholds;
+        std::vector<double> alpha_tickreturn_cov;
+        std::vector<double> alpha_tickreturn_cov_ci;  // 95% CI half-width
+
+        void save_csv(const std::string& path) const;
+    };
+
+    AlphaPnL compute_alpha_pnl(const Buffer& buffer, const std::vector<int64_t>& lags_ns, const std::vector<double>& quantiles);
+
+    class P2Quantile {
+        std::array<double, 5> q;   // marker heights (values)
+        std::array<double, 5> n;   // marker positions (actual)
+        std::array<double, 5> np;  // desired marker positions
+        std::array<double, 5> dn;  // desired position increments
+        int count = 0;
+        double p;                   // target quantile
+    
+    public:
+        explicit P2Quantile(double quantile) : p(quantile) {
+            dn = {0.0, p / 2.0, p, (1.0 + p) / 2.0, 1.0};
+        }
+    
+        void add(double x) {
+            if (count < 5) {
+                q[count] = x;
+                count++;
+                if (count == 5) {
+                    std::sort(q.begin(), q.end());
+                    for (int i = 0; i < 5; i++) n[i] = i;
+                    np = {0.0, 2.0 * p, 4.0 * p, 2.0 + 2.0 * p, 4.0};
+                }
+                return;
+            }
+    
+            // Find cell k
+            int k;
+            if (x < q[0]) { q[0] = x; k = 0; }
+            else if (x < q[1]) k = 0;
+            else if (x < q[2]) k = 1;
+            else if (x < q[3]) k = 2;
+            else if (x <= q[4]) k = 3;
+            else { q[4] = x; k = 3; }
+    
+            // Increment positions of markers k+1 through 4
+            for (int i = k + 1; i < 5; i++) n[i]++;
+    
+            // Update desired positions
+            for (int i = 0; i < 5; i++) np[i] += dn[i];
+    
+            // Adjust markers 1, 2, 3
+            for (int i = 1; i <= 3; i++) {
+                double d = np[i] - n[i];
+                if ((d >= 1.0 && n[i + 1] - n[i] > 1) ||
+                    (d <= -1.0 && n[i - 1] - n[i] < -1)) {
+                    int sign = (d > 0) ? 1 : -1;
+                    double qp = parabolic(i, sign);
+                    if (q[i - 1] < qp && qp < q[i + 1]) {
+                        q[i] = qp;
+                    } else {
+                        q[i] = linear(i, sign);
+                    }
+                    n[i] += sign;
+                }
+            }
+        }
+    
+        double estimate() const { return q[2]; }
+    
+        bool ready() const { return count >= 5; }
+    
+    private:
+        double parabolic(int i, int sign) const {
+            return q[i] + (sign / (n[i + 1] - n[i - 1])) * (
+                (n[i] - n[i - 1] + sign) * (q[i + 1] - q[i]) / (n[i + 1] - n[i]) +
+                (n[i + 1] - n[i] - sign) * (q[i] - q[i - 1]) / (n[i] - n[i - 1])
+            );
+        }
+    
+        double linear(int i, int sign) const {
+            return q[i] + sign * (q[i + sign] - q[i]) / (n[i + sign] - n[i]);
+        }
+    };
+
     // Unified simulation function
     Buffer run_simulation(OrderBook& lob, QRModel& model, int64_t duration,
                           Alpha* alpha = nullptr, MarketImpact* impact = nullptr,
                           Race* race = nullptr);
+
+    // Strategy trader simulation (accumulates stats in strategy trader)
+    void run_simulation_with_strategy(
+        OrderBook& lob, QRModel& model, int64_t duration,
+        Alpha* alpha, MarketImpact* impact, Race* race,
+        StrategyTrader& strategy,
+        DeltaDistrib* roundtrip_distrib = nullptr);
 
 }

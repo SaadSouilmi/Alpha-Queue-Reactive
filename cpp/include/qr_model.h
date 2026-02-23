@@ -78,7 +78,14 @@ namespace qr {
             total = 0.0;
             for (size_t i = 0; i < events.size(); i++) {
                 if (events[i].type == OrderType::Trade) {
-                    double factor = (events[i].side == Side::Bid) ? std::exp(b) : std::exp(-b);
+                    double factor = 1;
+                    if ((events[i].side == Side::Bid) && (b > 0)){
+                        factor = std::exp(b);
+                    }
+                    else if ((events[i].side == Side::Ask) && (b < 0)){
+                        factor = std::exp(-b);
+                    }
+                    // double factor = (events[i].side == Side::Bid) ? std::exp(b) : std::exp(-b);
                     probs[i] = base_probs[i] * factor;
                 }
                 else
@@ -231,51 +238,66 @@ namespace qr {
         int64_t last_time_ = 0;     // last update time (ns)
     };
 
+    // Power-law impact approximated as a sum of exponentials:
+    //   K(t) ≈ Σ_k w_k * exp(-λ_k * t)
+    // Each component is an EMA with its own decay rate and weight.
+    // half_lives_sec and weights are parsed from config.
+    // m: overall bias multiplier applied to the sum.
+    // O(K) per step, no trade history stored.
     class PowerLawImpact : public MarketImpact {
     public:
-        PowerLawImpact(double alpha, double A, double m, double eps = 1.5e9)
-            : alpha_(alpha), A_(A), m_(m), eps_(eps) {}
+        // half_lives_sec: per-component half-lives in seconds
+        // weights: per-component weights (from NNLS fit)
+        // m: overall bias multiplier
+        PowerLawImpact(const std::vector<double>& half_lives_sec,
+                       const std::vector<double>& weights,
+                       double m)
+            : m_(m), last_time_(0)
+        {
+            size_t K = half_lives_sec.size();
+            kappas_ns_.resize(K);
+            weights_.resize(K);
+            phis_.resize(K, 0.0);
+            for (size_t k = 0; k < K; k++) {
+                kappas_ns_[k] = std::log(2.0) / (half_lives_sec[k] * 1e9);
+                weights_[k] = weights[k];
+            }
+        }
 
         void step(int64_t time) override {
-            current_time_ = time;
+            if (last_time_ > 0 && time > last_time_) {
+                double dt = static_cast<double>(time - last_time_);
+                for (size_t k = 0; k < phis_.size(); k++) {
+                    phis_[k] *= std::exp(-kappas_ns_[k] * dt);
+                }
+            }
+            last_time_ = time;
         }
 
         void add_trade(Side side, int32_t size = 1) override {
-            double sign = (side == Side::Bid) ? -1.0 : 1.0;
+            double sign = (side == Side::Ask) ? 1.0 : -1.0;
             double impact = sign * std::sqrt(static_cast<double>(size));
-            timestamps_.push_back(current_time_);
-            impacts_.push_back(impact);
+            for (size_t k = 0; k < phis_.size(); k++) {
+                phis_[k] += weights_[k] * impact;
+            }
         }
 
         double bias_factor() const override {
             double sum = 0.0;
-            for (size_t i = 0; i < timestamps_.size(); i++) {
-                double dt = static_cast<double>(current_time_ - timestamps_[i]) + eps_;
-                double kernel;
-                if (alpha_ == 0.5)       kernel = 1.0 / std::sqrt(dt);
-                else if (alpha_ == 1.0)  kernel = 1.0 / dt;
-                else if (alpha_ == 1.5)  kernel = 1.0 / (dt * std::sqrt(dt));
-                else                     kernel = std::pow(dt, -alpha_);
-                sum += impacts_[i] * kernel;
+            for (size_t k = 0; k < phis_.size(); k++) {
+                sum += phis_[k];
             }
-            return std::clamp(A_ * sum, -m_, m_);
+            return m_ * sum;
         }
 
-        void clear() {
-            timestamps_.clear();
-            impacts_.clear();
-        }
-
-        size_t num_trades() const { return timestamps_.size(); }
+        size_t num_components() const { return phis_.size(); }
 
     private:
-        double alpha_;
-        double A_;
         double m_;
-        double eps_;
-        int64_t current_time_ = 0;
-        std::vector<int64_t> timestamps_;
-        std::vector<double> impacts_;
+        int64_t last_time_;
+        std::vector<double> kappas_ns_;  // decay rates per ns
+        std::vector<double> weights_;     // per-component weights
+        std::vector<double> phis_;        // per-component accumulators
     };
 
     class LinearImpact : public MarketImpact {
@@ -480,6 +502,7 @@ namespace qr {
         virtual double value() const = 0;
         virtual void reset() = 0;
         virtual void consume(double fraction) = 0;  // Reduce alpha by fraction (info acted upon)
+        virtual double scale() const { return 1.0; }
     };
 
     class NoAlpha : public Alpha {
@@ -488,15 +511,18 @@ namespace qr {
         double value() const override { return 0.0; }
         void reset() override {}
         void consume(double) override {}  // No-op for NoAlpha
+        double scale() const override { return 0.0; }
     };
 
     class OUAlpha : public Alpha {
     public:
         // kappa_per_min: mean reversion rate in min^-1
         // s: stationary standard deviation
-        OUAlpha(double kappa_per_min, double s, uint64_t seed)
+        // scale: multiplier applied to the OU output
+        OUAlpha(double kappa_per_min, double s, uint64_t seed, double scale = 1.0)
             : kappa_(kappa_per_min / (60.0 * 1e9)),
               sigma_(s * std::sqrt(2.0 * kappa_)),
+              scale_(scale),
               alpha_(0.0),
               rng_(seed) {}
 
@@ -508,6 +534,7 @@ namespace qr {
         }
 
         double value() const override { return alpha_; }
+        double scale() const override { return scale_; }
         void reset() override { alpha_ = 0.0; }
         void consume(double fraction) override {
             // Reduce alpha toward 0 by fraction (info acted upon)
@@ -517,6 +544,7 @@ namespace qr {
     private:
         double kappa_;    // in ns^-1
         double sigma_;    // σ = s·√(2κ)
+        double scale_;
         double alpha_;
         std::mt19937_64 rng_;
         std::normal_distribution<> normal_{0.0, 1.0};

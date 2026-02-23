@@ -201,12 +201,6 @@ def preprocess(
     )
     df = df.filter(pl.col("event_q").abs().le(2))
     df = df.with_columns(
-        pl.when(pl.col("spread").ge(2))
-        .then(2)
-        .otherwise(pl.col("spread"))
-        .alias("spread")
-    )
-    df = df.with_columns(
         event_side=pl.col("event_side").replace({"A": 1, "B": -1}).cast(int)
     )
     df = df.with_columns(
@@ -267,6 +261,7 @@ def preprocess(
         .otherwise(pl.col("delta_t"))
         .forward_fill()
     )
+    df = df.with_columns(mid=pl.col("P_1").add(pl.col("P_-1"))/2)
 
     return df.select(
         pl.exclude(
@@ -295,6 +290,12 @@ def preprocess(
 
 
 def daily_estimates(df: pl.LazyFrame) -> pl.LazyFrame:
+    df = df.with_columns(
+        pl.when(pl.col("spread").ge(2))
+        .then(2)
+        .otherwise(pl.col("spread"))
+        .alias("spread")
+    )
     is_create = (pl.col("event").eq("Create_Bid") | pl.col("event").eq("Create_Ask")) & pl.col("queue").eq(0)
     df = df.filter(pl.col("spread").eq(1) | is_create)
     stats = df.group_by(

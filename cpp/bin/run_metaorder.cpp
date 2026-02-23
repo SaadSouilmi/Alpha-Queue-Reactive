@@ -264,6 +264,8 @@ struct SimConfig {
     double impact_alpha;
     double impact_m;
     double half_life_sec;
+    std::vector<double> pl_half_lives;
+    std::vector<double> pl_weights;
 
     // Metaorder
     int32_t metaorder_vol;
@@ -307,6 +309,8 @@ void run_and_accumulate(const SimConfig& cfg, uint64_t seed, Accumulator& acc) {
         impact_ptr = std::make_unique<TimeDecayImpact>(cfg.half_life_sec, cfg.impact_m);
     } else if (cfg.impact_type == "ema") {
         impact_ptr = std::make_unique<EMAImpact>(cfg.impact_alpha, cfg.impact_m);
+    } else if (cfg.impact_type == "power_law") {
+        impact_ptr = std::make_unique<PowerLawImpact>(cfg.pl_half_lives, cfg.pl_weights, cfg.impact_m);
     } else {
         impact_ptr = std::make_unique<NoImpact>();
     }
@@ -350,22 +354,19 @@ void run_and_accumulate(const SimConfig& cfg, uint64_t seed, Accumulator& acc) {
         EventRecord record;
         record.record_lob(lob);
 
-        if (is_meta) {
+        if (order.type == OrderType::Trade) {
             fills.clear();
             lob.process(order, &fills);
             int32_t filled = 0;
             for (const auto& f : fills) filled += f.size;
-            cum_meta_vol += filled;
+            if (is_meta) cum_meta_vol += filled;
+            if (filled > 0) impact.update(order.side, order.ts, filled);
         } else {
             lob.process(order);
         }
 
         record.record_order(order);
         record.bias = current_bias;
-
-        if (order.type == OrderType::Trade) {
-            impact.update(order.side, order.ts, order.size);
-        }
 
         buffer.records.push_back(record);
         cum_vol_vec.push_back(cum_meta_vol);
@@ -431,12 +432,22 @@ Example config.json:
     double impact_alpha = 0.005;
     double impact_m = 4.5;
     double half_life_sec = 300.0;
+    std::vector<double> pl_half_lives;
+    std::vector<double> pl_weights;
     if (doc.HasMember("impact") && doc["impact"].IsObject()) {
         const auto& imp = doc["impact"];
         impact_type = get_string(imp, "type", "no_impact");
         impact_alpha = get_double(imp, "alpha", 0.005);
         impact_m = get_double(imp, "m", 4.5);
         half_life_sec = get_double(imp, "half_life_sec", 300.0);
+        if (imp.HasMember("half_lives") && imp["half_lives"].IsArray()) {
+            for (const auto& v : imp["half_lives"].GetArray())
+                pl_half_lives.push_back(v.GetDouble());
+        }
+        if (imp.HasMember("weights") && imp["weights"].IsArray()) {
+            for (const auto& v : imp["weights"].GetArray())
+                pl_weights.push_back(v.GetDouble());
+        }
     }
 
     // Metaorder percentages
@@ -462,6 +473,8 @@ Example config.json:
         std::cout << " (alpha=" << impact_alpha << ", m=" << impact_m << ")";
     } else if (impact_type == "time_decay") {
         std::cout << " (half_life=" << half_life_sec << "s, m=" << impact_m << ")";
+    } else if (impact_type == "power_law") {
+        std::cout << " (K=" << pl_half_lives.size() << " components, m=" << impact_m << ")";
     }
     std::cout << "\n";
     std::cout << "Duration: " << duration_min << " min, Metaorder execution: " << exec_min << " min\n";
@@ -493,6 +506,8 @@ Example config.json:
     sim_cfg.impact_alpha = impact_alpha;
     sim_cfg.impact_m = impact_m;
     sim_cfg.half_life_sec = half_life_sec;
+    sim_cfg.pl_half_lives = pl_half_lives;
+    sim_cfg.pl_weights = pl_weights;
     sim_cfg.max_order_size = max_order_size;
     sim_cfg.exec_duration_ns = exec_duration_ns;
     sim_cfg.duration = duration;

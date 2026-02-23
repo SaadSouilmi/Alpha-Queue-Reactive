@@ -51,6 +51,20 @@ target_link_libraries(sample
     Parquet::parquet_static
 )
 
+# Strategy simulation executable
+add_executable(sample_strategy
+    cpp/bin/sample_strategy.cpp
+    ${QR_SOURCES}
+)
+
+target_include_directories(sample_strategy PRIVATE ${RAPIDJSON_INCLUDE_DIRS})
+
+target_link_libraries(sample_strategy
+    Arrow::arrow_static
+    Parquet::parquet_static
+    Threads::Threads
+)
+
 # Metaorder simulation executable
 add_executable(run_metaorder
     cpp/bin/run_metaorder.cpp

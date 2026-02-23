@@ -140,30 +140,30 @@ int64_t GammaDistrib::sample(std::mt19937_64& rng) const {
 // ============================================================================
 
 LogisticRace::LogisticRace(const std::string& data_path, bool use_weibull)
-    : delta_(data_path + "/delta_distrib.csv"),
+    : delta_(data_path + "/qr_params/delta_distrib.csv"),
       use_weibull_(use_weibull)
 {
     if (use_weibull_) {
-        weibull_ = std::make_unique<WeibullDistrib>(data_path + "/weibull_distrib.csv");
+        weibull_ = std::make_unique<WeibullDistrib>(data_path + "/qr_params/weibull_distrib.csv");
     } else {
-        gamma_ = std::make_unique<GammaDistrib>(data_path + "/gamma_distrib.csv");
+        gamma_ = std::make_unique<GammaDistrib>(data_path + "/qr_params/gamma_distrib.csv");
     }
 }
 
 LogisticRace::LogisticRace(const std::string& data_path, bool use_weibull, const RaceParams& params)
     : params_(params),
-      delta_(data_path + "/delta_distrib.csv"),
+      delta_(data_path + "/qr_params/delta_distrib.csv"),
       use_weibull_(use_weibull)
 {
     if (use_weibull_) {
-        weibull_ = std::make_unique<WeibullDistrib>(data_path + "/weibull_distrib.csv");
+        weibull_ = std::make_unique<WeibullDistrib>(data_path + "/qr_params/weibull_distrib.csv");
     } else {
-        gamma_ = std::make_unique<GammaDistrib>(data_path + "/gamma_distrib.csv");
+        gamma_ = std::make_unique<GammaDistrib>(data_path + "/qr_params/gamma_distrib.csv");
     }
 }
 
-bool LogisticRace::should_race(double alpha, std::mt19937_64& rng) const {
-    double p = params_.race_probability(alpha);
+bool LogisticRace::should_race(double signal, std::mt19937_64& rng) const {
+    double p = params_.race_probability(signal);
     if (p <= 0.0) return false;
 
     std::uniform_real_distribution<double> uniform(0.0, 1.0);

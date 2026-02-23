@@ -56,20 +56,21 @@ struct RaceParams {
     double mean_size = 3.0;       // geometric mean for racer size
     double alpha_decay = 0.0;     // fraction of alpha consumed after race (0 = no decay)
 
-    // P(race|α) = 0 if |α| < min_threshold, else logistic
-    double race_probability(double alpha) const {
-        double abs_alpha = std::abs(alpha);
-        if (abs_alpha < min_threshold) return 0.0;
-        return 1.0 / (1.0 + std::exp(-steepness * (abs_alpha - threshold)));
+    // P(race|signal) = 0 if |signal| < min_threshold, else logistic
+    // signal = alpha + imbalance (or just alpha if no imbalance)
+    double race_probability(double signal) const {
+        double abs_signal = std::abs(signal);
+        if (abs_signal < min_threshold) return 0.0;
+        return 1.0 / (1.0 + std::exp(-steepness * (abs_signal - threshold)));
     }
 
     // Probabilities are constant (no limits, no dynamic adjustment)
 
-    // Sample number of racers from geometric distribution (mean scales with |α|)
-    int sample_num_racers(double alpha, std::mt19937_64& rng) const {
-        double abs_alpha = std::abs(alpha);
-        // mean = base + scale * (|α| - threshold), clamped to at least base
-        double mean = base_mean_racers + racer_scale * std::max(0.0, abs_alpha - threshold);
+    // Sample number of racers from geometric distribution (mean scales with |signal|)
+    int sample_num_racers(double signal, std::mt19937_64& rng) const {
+        double abs_signal = std::abs(signal);
+        // mean = base + scale * (|signal| - threshold), clamped to at least base
+        double mean = base_mean_racers + racer_scale * std::max(0.0, abs_signal - threshold);
         double p = 1.0 / mean;
         std::geometric_distribution<int> dist(p);
         return std::max(3, dist(rng) + 1);  // at least 3 racers
@@ -87,7 +88,7 @@ struct RaceParams {
 class Race {
 public:
     virtual ~Race() = default;
-    virtual bool should_race(double alpha, std::mt19937_64& rng) const = 0;
+    virtual bool should_race(double signal, std::mt19937_64& rng) const = 0;
 
     // Legacy: generate racers with timestamps (for backward compatibility)
     virtual std::vector<Order> generate_racers(double alpha, int64_t base_time,
@@ -113,7 +114,7 @@ public:
 // No-op race (for running without race mechanism)
 class NoRace : public Race {
 public:
-    bool should_race(double /*alpha*/, std::mt19937_64& /*rng*/) const override {
+    bool should_race(double /*signal*/, std::mt19937_64& /*rng*/) const override {
         return false;
     }
     std::vector<Order> generate_racers(double /*alpha*/, int64_t /*base_time*/,
@@ -142,7 +143,7 @@ public:
     LogisticRace(const std::string& data_path, bool use_weibull);
     LogisticRace(const std::string& data_path, bool use_weibull, const RaceParams& params);
 
-    bool should_race(double alpha, std::mt19937_64& rng) const override;
+    bool should_race(double signal, std::mt19937_64& rng) const override;
 
     // Legacy: generate racers with timestamps
     std::vector<Order> generate_racers(double alpha, int64_t base_time,
