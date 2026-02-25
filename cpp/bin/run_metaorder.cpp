@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <thread>
 #include <mutex>
+#include <atomic>
 #include <fstream>
 #include <sstream>
 #include <random>
@@ -159,7 +160,6 @@ struct Accumulator {
     std::vector<double> bias_sum;
     std::vector<double> bias_sum_sq;
     std::vector<double> vol_sum;
-    std::mutex mtx;
     int count = 0;
 
     Accumulator(int64_t duration, int64_t step) {
@@ -173,40 +173,30 @@ struct Accumulator {
         }
     }
 
-    void add(const Buffer& buffer, const std::vector<int32_t>& cum_vol) {
-        if (buffer.records.empty()) return;
-
-        double mid0 = (buffer.records[0].best_bid_price +
-                       buffer.records[0].best_ask_price) / 2.0;
-
-        std::vector<double> proj_mid(grid.size(), 0.0);
-        std::vector<double> proj_bias(grid.size(), 0.0);
-        std::vector<double> proj_vol(grid.size(), 0.0);
-
-        size_t j = 0;
+    void add(const std::vector<double>& grid_mid,
+             const std::vector<double>& grid_bias,
+             const std::vector<int32_t>& grid_vol) {
+        double mid0 = grid_mid[0];
         for (size_t i = 0; i < grid.size(); i++) {
-            while (j + 1 < buffer.records.size() &&
-                   buffer.records[j + 1].timestamp <= grid[i]) {
-                j++;
-            }
-            if (j < buffer.records.size()) {
-                double mid = (buffer.records[j].best_bid_price +
-                              buffer.records[j].best_ask_price) / 2.0;
-                proj_mid[i] = mid - mid0;
-                proj_bias[i] = buffer.records[j].bias;
-                proj_vol[i] = cum_vol[j];
-            }
-        }
-
-        std::lock_guard<std::mutex> lock(mtx);
-        for (size_t i = 0; i < grid.size(); i++) {
-            mid_sum[i] += proj_mid[i];
-            mid_sum_sq[i] += proj_mid[i] * proj_mid[i];
-            bias_sum[i] += proj_bias[i];
-            bias_sum_sq[i] += proj_bias[i] * proj_bias[i];
-            vol_sum[i] += proj_vol[i];
+            double dm = grid_mid[i] - mid0;
+            mid_sum[i] += dm;
+            mid_sum_sq[i] += dm * dm;
+            bias_sum[i] += grid_bias[i];
+            bias_sum_sq[i] += grid_bias[i] * grid_bias[i];
+            vol_sum[i] += grid_vol[i];
         }
         count++;
+    }
+
+    void merge(const Accumulator& other) {
+        for (size_t i = 0; i < grid.size(); i++) {
+            mid_sum[i] += other.mid_sum[i];
+            mid_sum_sq[i] += other.mid_sum_sq[i];
+            bias_sum[i] += other.bias_sum[i];
+            bias_sum_sq[i] += other.bias_sum_sq[i];
+            vol_sum[i] += other.vol_sum[i];
+        }
+        count += other.count;
     }
 
     void save_csv(const std::string& path) {
@@ -254,10 +244,11 @@ MetaOrder build_metaorder(int32_t total_vol, Side side, int32_t max_order_size, 
 // --- Per-simulation worker ---
 
 struct SimConfig {
-    std::string params_path;
     const QueueDistributions* dists;
     const DeltaT* delta_t;
     const std::vector<LOBConfig>* lob_configs;
+    const QRParams* params;
+    const SizeDistributions* size_dists;
 
     // Impact
     std::string impact_type;
@@ -268,13 +259,11 @@ struct SimConfig {
     std::vector<double> pl_weights;
 
     // Metaorder
-    int32_t metaorder_vol;
-    int32_t max_order_size;
-    int64_t exec_duration_ns;
+    const MetaOrder* metaorder;
 
     // Simulation
     int64_t duration;
-    bool use_total_lvl;
+    int64_t grid_step;
 };
 
 void run_and_accumulate(const SimConfig& cfg, uint64_t seed, Accumulator& acc) {
@@ -288,18 +277,11 @@ void run_and_accumulate(const SimConfig& cfg, uint64_t seed, Accumulator& acc) {
              std::vector<int32_t>(ASK_PRICES.begin(), ASK_PRICES.end()),
              std::vector<int32_t>(lob_cfg.ask_vols.begin(), lob_cfg.ask_vols.end()));
 
-    QRParams params(cfg.params_path);
-    if (cfg.use_total_lvl) {
-        params.load_total_lvl_quantiles(cfg.params_path + "/total_lvl_quantiles.csv");
-        params.load_event_probabilities_3d(cfg.params_path + "/event_probabilities_3d.csv");
-    }
-    SizeDistributions size_dists(cfg.params_path + "/size_distrib.csv");
-
     std::unique_ptr<QRModel> model_ptr;
     if (cfg.delta_t) {
-        model_ptr = std::make_unique<QRModel>(&lob, params, size_dists, *cfg.delta_t, seed);
+        model_ptr = std::make_unique<QRModel>(&lob, *cfg.params, *cfg.size_dists, *cfg.delta_t, seed);
     } else {
-        model_ptr = std::make_unique<QRModel>(&lob, params, size_dists, seed);
+        model_ptr = std::make_unique<QRModel>(&lob, *cfg.params, *cfg.size_dists, seed);
     }
     QRModel& model = *model_ptr;
 
@@ -316,16 +298,22 @@ void run_and_accumulate(const SimConfig& cfg, uint64_t seed, Accumulator& acc) {
     }
     MarketImpact& impact = *impact_ptr;
 
-    MetaOrder metaorder = build_metaorder(cfg.metaorder_vol, Side::Ask, cfg.max_order_size, cfg.exec_duration_ns);
+    const MetaOrder& metaorder = *cfg.metaorder;
 
-    Buffer buffer;
-    std::vector<int32_t> cum_vol_vec;
+    // Grid arrays for on-the-fly projection
+    size_t grid_size = static_cast<size_t>(cfg.duration / cfg.grid_step) + 1;
+    std::vector<double> grid_mid(grid_size, 0.0);
+    std::vector<double> grid_bias(grid_size, 0.0);
+    std::vector<int32_t> grid_vol(grid_size, 0);
+    size_t grid_idx = 0;
+
     std::vector<Fill> fills;
     int64_t time = 0;
     size_t meta_i = 0;
     size_t meta_n = metaorder.timestamps.size();
     double current_bias = 0.0;
     int32_t cum_meta_vol = 0;
+    double current_mid = (lob.best_bid() + lob.best_ask()) / 2.0;
     Order order;
     bool is_meta = false;
 
@@ -351,9 +339,6 @@ void run_and_accumulate(const SimConfig& cfg, uint64_t seed, Accumulator& acc) {
             is_meta = false;
         }
 
-        EventRecord record;
-        record.record_lob(lob);
-
         if (order.type == OrderType::Trade) {
             fills.clear();
             lob.process(order, &fills);
@@ -365,14 +350,26 @@ void run_and_accumulate(const SimConfig& cfg, uint64_t seed, Accumulator& acc) {
             lob.process(order);
         }
 
-        record.record_order(order);
-        record.bias = current_bias;
+        current_mid = (lob.best_bid() + lob.best_ask()) / 2.0;
 
-        buffer.records.push_back(record);
-        cum_vol_vec.push_back(cum_meta_vol);
+        // Project onto grid: fill all grid points up to current time
+        while (grid_idx < grid_size && static_cast<int64_t>(grid_idx) * cfg.grid_step <= time) {
+            grid_mid[grid_idx] = current_mid;
+            grid_bias[grid_idx] = current_bias;
+            grid_vol[grid_idx] = cum_meta_vol;
+            grid_idx++;
+        }
     }
 
-    acc.add(buffer, cum_vol_vec);
+    // Fill any remaining grid points with final state
+    while (grid_idx < grid_size) {
+        grid_mid[grid_idx] = current_mid;
+        grid_bias[grid_idx] = current_bias;
+        grid_vol[grid_idx] = cum_meta_vol;
+        grid_idx++;
+    }
+
+    acc.add(grid_mid, grid_bias, grid_vol);
 }
 
 // --- Main ---
@@ -482,7 +479,7 @@ Example config.json:
     std::cout << "Sims: " << num_sims << ", Threads: " << num_threads << "\n";
     std::cout << "Grid: " << (duration / grid_step + 1) << " points (" << (grid_step / 1'000'000) << "ms spacing)\n";
 
-    // Load shared data
+    // Load shared data (loaded once, shared read-only across all threads)
     QueueDistributions dists(params_path + "/invariant_distributions_qmax50.csv");
 
     std::unique_ptr<MixtureDeltaT> delta_t_ptr;
@@ -494,58 +491,81 @@ Example config.json:
     std::vector<LOBConfig> lob_configs = load_lob_configs(params_path + "/random_lob.csv");
     std::cout << "Loaded " << lob_configs.size() << " LOB configs\n";
 
+    QRParams params(params_path);
+    if (use_total_lvl) {
+        params.load_total_lvl_quantiles(params_path + "/total_lvl_quantiles.csv");
+        params.load_event_probabilities_3d(params_path + "/event_probabilities_3d.csv");
+    }
+    SizeDistributions size_dists(params_path + "/size_distrib.csv");
+    std::cout << "Loaded QRParams and SizeDistributions\n";
+
     std::filesystem::create_directories(results_path);
 
     // Build SimConfig (shared across all workers)
     SimConfig sim_cfg;
-    sim_cfg.params_path = params_path;
     sim_cfg.dists = &dists;
     sim_cfg.delta_t = delta_t;
     sim_cfg.lob_configs = &lob_configs;
+    sim_cfg.params = &params;
+    sim_cfg.size_dists = &size_dists;
     sim_cfg.impact_type = impact_type;
     sim_cfg.impact_alpha = impact_alpha;
     sim_cfg.impact_m = impact_m;
     sim_cfg.half_life_sec = half_life_sec;
     sim_cfg.pl_half_lives = pl_half_lives;
     sim_cfg.pl_weights = pl_weights;
-    sim_cfg.max_order_size = max_order_size;
-    sim_cfg.exec_duration_ns = exec_duration_ns;
     sim_cfg.duration = duration;
-    sim_cfg.use_total_lvl = use_total_lvl;
+    sim_cfg.grid_step = grid_step;
 
     auto total_start = std::chrono::high_resolution_clock::now();
 
     for (double pct : metaorder_pcts) {
         int32_t metaorder_vol = static_cast<int32_t>(hourly_vol * pct / 100.0);
-        sim_cfg.metaorder_vol = metaorder_vol;
 
         std::cout << "\n=== Metaorder " << pct << "% of hourly vol (" << metaorder_vol << " shares) ===\n";
 
-        MetaOrder sample_meta = build_metaorder(metaorder_vol, Side::Ask, max_order_size, exec_duration_ns);
-        std::cout << "  Orders: " << sample_meta.timestamps.size() << ", sizes: ";
-        for (size_t i = 0; i < std::min(sample_meta.sizes.size(), size_t(5)); i++) {
-            std::cout << sample_meta.sizes[i] << " ";
+        MetaOrder metaorder = build_metaorder(metaorder_vol, Side::Ask, max_order_size, exec_duration_ns);
+        sim_cfg.metaorder = &metaorder;
+
+        std::cout << "  Orders: " << metaorder.timestamps.size() << ", sizes: ";
+        for (size_t i = 0; i < std::min(metaorder.sizes.size(), size_t(5)); i++) {
+            std::cout << metaorder.sizes[i] << " ";
         }
-        if (sample_meta.sizes.size() > 5) std::cout << "...";
+        if (metaorder.sizes.size() > 5) std::cout << "...";
         std::cout << "\n";
 
         Accumulator acc(duration, grid_step);
 
         auto start = std::chrono::high_resolution_clock::now();
 
-        for (int batch_start = 0; batch_start < num_sims; batch_start += num_threads) {
-            int batch_end = std::min(batch_start + num_threads, num_sims);
+        std::atomic<int> next_sim(0);
+        std::atomic<int> done_sims(0);
+        std::vector<std::thread> workers;
+        std::vector<Accumulator> local_accs;
+        workers.reserve(num_threads);
+        local_accs.reserve(num_threads);
+        for (int t = 0; t < num_threads; t++) {
+            local_accs.emplace_back(duration, grid_step);
+        }
 
-            std::vector<std::future<void>> futures;
-            for (int i = batch_start; i < batch_end; i++) {
-                futures.push_back(std::async(std::launch::async,
-                    run_and_accumulate, std::cref(sim_cfg), static_cast<uint64_t>(i), std::ref(acc)));
-            }
-            for (auto& f : futures) f.get();
+        for (int t = 0; t < num_threads; t++) {
+            workers.emplace_back([&, t]() {
+                Accumulator& local = local_accs[t];
+                while (true) {
+                    int i = next_sim.fetch_add(1);
+                    if (i >= num_sims) break;
+                    run_and_accumulate(sim_cfg, static_cast<uint64_t>(i), local);
+                    int d = done_sims.fetch_add(1) + 1;
+                    if (d % 10000 == 0) {
+                        std::cout << "  Progress: " << d << "/" << num_sims << "\n";
+                    }
+                }
+            });
+        }
+        for (auto& w : workers) w.join();
 
-            if (batch_start % 10000 == 0) {
-                std::cout << "  Progress: " << batch_start << "/" << num_sims << "\n";
-            }
+        for (const auto& local : local_accs) {
+            acc.merge(local);
         }
 
         std::string out_path = results_path + config_hash + "_pct_" + std::to_string(static_cast<int>(pct * 10)) + ".csv";
